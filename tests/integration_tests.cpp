@@ -1,4 +1,10 @@
 #include <gtest/gtest.h>
+#include <atomic>
+
+// Count contract violations instead of asserting, so tests can check for them
+static std::atomic<int> g_unsafe_destroys{0};
+#define SLICK_SOCKET_ON_UNSAFE_DESTROY() (++g_unsafe_destroys)
+
 #include "../examples/logger.h"
 #include <slick/socket/tcp_server.h>
 #include <slick/socket/tcp_client.h>
@@ -8,6 +14,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <algorithm>
+#include <cstring>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -38,12 +46,23 @@ public:
             stop();  // stopping from within a callback must not self-join the server thread
             return;
         }
+        while (hold) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));  // simulate a stalled server
+        }
+        if (length == 5 && std::memcmp(data, "flood", 5) == 0) {
+            flood(client_id);
+            return;
+        }
         data_received++;
         bytes_received += length;
         last_data_client_id = client_id;
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
             last_received_data_.assign((const char*)data, length);
+        }
+
+        if (!echo) {
+            return;
         }
 
         // Echo the data back to the client
@@ -57,6 +76,28 @@ public:
     }
 
     std::thread& server_thread() { return server_thread_; }
+
+    // Sends flood_payload to the client in 1 MiB messages from within a single callback
+    void flood(int client_id) {
+        constexpr size_t chunk = 1024 * 1024;
+        for (size_t offset = 0; offset < flood_payload.size(); offset += chunk) {
+            const size_t size = (std::min)(chunk, flood_payload.size() - offset);
+            std::vector<uint8_t> message(flood_payload.begin() + offset, flood_payload.begin() + offset + size);
+            if (send_data(client_id, message)) {
+                flood_accepted += size;
+            } else {
+                send_failures++;
+            }
+        }
+        flood_done = true;
+    }
+
+    std::vector<uint8_t> flood_payload;  // set before the flood is triggered
+    std::atomic<size_t> flood_accepted{0};
+    std::atomic<int> send_failures{0};
+    std::atomic<bool> flood_done{false};
+    std::atomic<bool> hold{false};
+    std::atomic<bool> echo{true};
 
     std::atomic<int> connected_clients{0};
     std::atomic<int> disconnected_clients{0};
@@ -91,6 +132,9 @@ public:
     }
 
     void onData(const uint8_t* data, size_t length) {
+        while (hold) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));  // simulate a slow reader
+        }
         data_received_count++;
         bytes_received += length;
         {
@@ -105,6 +149,8 @@ public:
         return received_data_;
     }
 
+    std::thread& client_thread() { return client_thread_; }
+
     std::atomic<int> connected_count{0};
     std::atomic<int> disconnected_count{0};
     std::atomic<int> data_received_count{0};
@@ -112,6 +158,7 @@ public:
     std::atomic<bool> connection_established{false};
     std::atomic<bool> data_received_flag{false};
     std::atomic<int>* external_disconnects = nullptr;  // outlives the client, unlike the members above
+    std::atomic<bool> hold{false};
 
 private:
     std::mutex data_mutex_;
@@ -142,6 +189,29 @@ static std::chrono::nanoseconds thread_cpu_time(std::thread& thread)
 #endif
 }
 
+static std::vector<uint8_t> make_payload(size_t size)
+{
+    std::vector<uint8_t> payload(size);
+    for (size_t i = 0; i < size; ++i) {
+        payload[i] = static_cast<uint8_t>((i * 31) % 251);
+    }
+    return payload;
+}
+
+// Asserts that a thread used less than a quarter of a 500ms window on the CPU
+static void expect_mostly_idle(std::thread& thread, const char* what)
+{
+    constexpr auto window = std::chrono::milliseconds(500);
+    auto cpu_before = thread_cpu_time(thread);
+    ASSERT_GE(cpu_before.count(), 0);
+    std::this_thread::sleep_for(window);
+    auto cpu_used = thread_cpu_time(thread) - cpu_before;
+
+    EXPECT_LT(cpu_used, window / 4)
+        << what << " used " << std::chrono::duration_cast<std::chrono::milliseconds>(cpu_used).count()
+        << "ms of CPU in " << window.count() << "ms";
+}
+
 class TCPIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -164,6 +234,9 @@ protected:
         if (server_ && server_->is_running()) {
             server_->stop();
         }
+
+        // Every object destroyed during the test must have been stopped/disconnected first
+        EXPECT_EQ(g_unsafe_destroys.exchange(0), expected_unsafe_destroys_);
     }
 
     // Helper to wait for condition with timeout
@@ -196,6 +269,7 @@ protected:
     slick::socket::TCPClientConfig client_config_;
     std::unique_ptr<IntegrationTestServer> server_;
     std::unique_ptr<IntegrationTestClient> client_;
+    int expected_unsafe_destroys_ = 0;
 };
 
 TEST_F(TCPIntegrationTest, ServerClientLifecycle) {
@@ -287,8 +361,10 @@ TEST_F(TCPIntegrationTest, ClientSurvivesServerInitiatedDisconnect) {
     server_->stop();
     ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 2; }));
 
-    // Destroying the client with a finished-but-unjoined thread must not call std::terminate
+    // Destroying the client with a finished-but-unjoined thread must not call std::terminate.
+    // Skipping disconnect() breaks the lifetime contract, so it is also reported.
     client_.reset();
+    expected_unsafe_destroys_ = 1;
 }
 
 // stop() must not tear down connection state while the server thread is still using it
@@ -429,6 +505,26 @@ TEST_F(TCPIntegrationTest, DestroyConnectedClientSkipsDisconnectCallback) {
     client_.reset();
     EXPECT_EQ(disconnects.load(), 0);
     ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+
+    // Destroying a connected client breaks the contract and is reported
+    expected_unsafe_destroys_ = 1;
+}
+
+// Destroying a running server without stop() is reported
+TEST_F(TCPIntegrationTest, DestroyRunningServerIsReported) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_.reset();
+    expected_unsafe_destroys_ = 1;
+
+    // A stopped server and a disconnected client are fine to destroy
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+    client_->disconnect();
+    client_.reset();
+    server_->stop();
+    server_.reset();
+    EXPECT_EQ(g_unsafe_destroys.load(), 1);
 }
 
 // get_connected_client_count() is read here while the server thread adds and removes clients
@@ -451,4 +547,123 @@ TEST_F(TCPIntegrationTest, ConnectedClientCountFromAnotherThread) {
         EXPECT_TRUE(waitForCondition([&client]() { return !client->is_connected(); }));
         client->disconnect();
     }
+}
+
+// An idle connected client must block in poll() rather than spin on recv()
+TEST_F(TCPIntegrationTest, IdleClientDoesNotSpinClientThread) {
+#if defined(__APPLE__)
+    GTEST_SKIP() << "Per-thread CPU time is not measured on macOS";
+#endif
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    expect_mostly_idle(client_->client_thread(), "idle client thread");
+
+    // Still receives promptly after idling
+    ASSERT_TRUE(client_->send_data(std::string("wake")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "wake"; }));
+}
+
+// A client that stops reading must not stall the server thread for everyone else
+TEST_F(TCPIntegrationTest, SlowReaderDoesNotBlockServer) {
+    server_config_.max_pending_send_bytes = 64 * 1024 * 1024;
+    ASSERT_NO_FATAL_FAILURE(startServer());
+
+    auto slow = connectClient("SlowClient");
+    client_ = connectClient("FastClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
+
+    const auto payload = make_payload(32 * 1024 * 1024);
+    server_->flood_payload = payload;
+    slow->hold = true;
+    ASSERT_TRUE(slow->send_data(std::string("flood")));
+
+    // With a blocking send the server thread would spin until the slow client reads again
+    EXPECT_TRUE(waitForCondition([this]() { return server_->flood_done.load(); }, 5000));
+    EXPECT_EQ(server_->send_failures.load(), 0);
+    ASSERT_TRUE(client_->send_data(std::string("ping")));
+    EXPECT_TRUE(waitForCondition([this]() { return client_->received_data() == "ping"; }, 3000));
+
+    // Once the slow client reads again, the queued data arrives complete and in order
+    slow->hold = false;
+    ASSERT_TRUE(waitForCondition([&]() { return slow->bytes_received.load() == payload.size(); }, 20000))
+        << "slow client received " << slow->bytes_received.load() << " of " << payload.size() << " bytes";
+    EXPECT_TRUE(slow->received_data() == std::string(payload.begin(), payload.end()));
+
+    slow->disconnect();
+}
+
+// send_data() rejects whole messages once a client's queue reaches max_pending_send_bytes
+TEST_F(TCPIntegrationTest, PendingSendLimitRejectsMessages) {
+    server_config_.max_pending_send_bytes = 1024 * 1024;
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("SlowClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    const auto payload = make_payload(32 * 1024 * 1024);
+    server_->flood_payload = payload;
+    client_->hold = true;
+    ASSERT_TRUE(client_->send_data(std::string("flood")));
+    ASSERT_TRUE(waitForCondition([this]() { return server_->flood_done.load(); }, 5000));
+    EXPECT_GT(server_->send_failures.load(), 0);
+    EXPECT_LT(server_->flood_accepted.load(), payload.size());
+
+    // Rejected messages are dropped whole, so the client sees an intact prefix of the stream
+    client_->hold = false;
+    const size_t accepted = server_->flood_accepted.load();
+    ASSERT_TRUE(waitForCondition([&]() { return client_->bytes_received.load() == accepted; }, 10000));
+    EXPECT_TRUE(client_->received_data() == std::string(payload.begin(), payload.begin() + accepted));
+    EXPECT_TRUE(client_->is_connected());
+}
+
+// A client sending into a stalled server must wait in poll() rather than spin on send()
+TEST_F(TCPIntegrationTest, ClientSendDoesNotSpinWhenServerStalls) {
+#if defined(__APPLE__)
+    GTEST_SKIP() << "Per-thread CPU time is not measured on macOS";
+#endif
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->echo = false;
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    server_->hold = true;
+
+    // Send 1 MiB messages until the socket buffers fill and send_data() blocks. The OS may accept
+    // a lot before that (Windows loopback takes a whole 32 MiB send at once), so loop until it stalls.
+    const auto message = make_payload(1024 * 1024);
+    constexpr int max_messages = 256;
+    std::atomic<int> messages_sent{0};
+    std::atomic<bool> send_failed{false};
+    std::thread sender([&]() {
+        for (int i = 0; i < max_messages; ++i) {
+            if (!client_->send_data(message)) {
+                send_failed = true;
+                return;
+            }
+            messages_sent++;
+        }
+    });
+
+    // Blocked once the count stops moving
+    int last = -1;
+    ASSERT_TRUE(waitForCondition([&]() {
+        const int now = messages_sent.load();
+        const bool stalled = now == last;
+        last = now;
+        if (!stalled) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return stalled;
+    }, 10000));
+    ASSERT_LT(messages_sent.load(), max_messages) << "send_data() never blocked";
+    expect_mostly_idle(sender, "blocked sender thread");
+
+    server_->hold = false;
+    sender.join();
+    EXPECT_FALSE(send_failed.load());
+    EXPECT_EQ(messages_sent.load(), max_messages);
+    ASSERT_TRUE(waitForCondition([&]() {
+        return server_->bytes_received.load() == static_cast<size_t>(max_messages) * message.size();
+    }, 20000));
 }

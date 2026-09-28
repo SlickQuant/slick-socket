@@ -33,6 +33,10 @@ inline TCPServerBase<DrivedT>::TCPServerBase(std::string name, const TCPServerCo
 template<typename DrivedT>
 inline TCPServerBase<DrivedT>::~TCPServerBase()
 {
+    if (!detail::stopped_before_destroy(server_thread_, name_))
+    {
+        SLICK_SOCKET_ON_UNSAFE_DESTROY();
+    }
     stop();
     WSACleanup();
 }
@@ -105,6 +109,14 @@ inline bool TCPServerBase<DrivedT>::start()
         config_.port = ntohs(server_addr.sin_port);
     }
 
+    // Set up the event loop here so a failure is reported by start() rather than a dead server thread
+    if (!create_event_loop())
+    {
+        closesocket(server_socket_);
+        server_socket_ = INVALID_SOCKET;
+        return false;
+    }
+
     running_.store(true, std::memory_order_release);
 
     // Start single-threaded server loop
@@ -139,54 +151,60 @@ inline void TCPServerBase<DrivedT>::release_resources()
 }
 
 template<typename DrivedT>
-inline bool TCPServerBase<DrivedT>::send_data(int client_id, const std::vector<uint8_t>& data)
+inline auto TCPServerBase<DrivedT>::write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent) -> SendStatus
 {
-    auto it = clients_.find(client_id);
-    if (it == clients_.end())
+    while (sent < size)
     {
+        int result = ::send(socket, reinterpret_cast<const char*>(data + sent), static_cast<int>(size - sent), 0);
+        if (result != SOCKET_ERROR)
+        {
+            sent += static_cast<size_t>(result);
+            continue;
+        }
+        int error = WSAGetLastError();
+        if (error == WSAEINTR)
+        {
+            continue;
+        }
+        if (error == WSAEWOULDBLOCK)
+        {
+            return SendStatus::would_block;
+        }
+        LOG_ERROR("Failed to send data: error {}", error);
+        return SendStatus::failed;
+    }
+    return SendStatus::complete;
+}
+
+template<typename DrivedT>
+inline bool TCPServerBase<DrivedT>::set_write_interest(SocketT socket, bool enable)
+{
+    struct epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLRDHUP | (enable ? EPOLLOUT : 0);
+    ev.data.sock = socket;
+    return epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, socket, &ev) == 0;
+}
+
+template<typename DrivedT>
+inline bool TCPServerBase<DrivedT>::create_event_loop()
+{
+    epoll_fd_ = epoll_create1(0);
+    if (epoll_fd_ == nullptr)
+    {
+        LOG_ERROR("Failed to create epoll instance");
         return false;
     }
 
-    size_t total_sent = 0;
-    size_t data_size = data.size();
-    const char* buffer = reinterpret_cast<const char*>(data.data());
-
-    // Keep sending until all data is sent
-    while (total_sent < data_size)
+    struct epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.sock = server_socket_;  // Full-width SOCKET; data.fd would truncate 64-bit handles
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_socket_, &ev) < 0)
     {
-        int sent = send(it->second.socket, buffer + total_sent, static_cast<int>(data_size - total_sent), 0);
-        if (sent == SOCKET_ERROR)
-        {
-            int error = WSAGetLastError();
-
-            // Check for non-blocking specific errors
-            if (error == WSAEWOULDBLOCK)
-            {
-                // Socket buffer is full, retry immediately
-                continue;
-            }
-
-            LOG_ERROR("Failed to send data to client {}: error {}", client_id, error);
-
-            // Check if connection is broken
-            if (error == WSAECONNRESET || error == WSAECONNABORTED || error == WSAENOTCONN)
-            {
-                LOG_INFO("Connection lost during send to client {}, disconnecting", client_id);
-                disconnect_client(client_id);
-            }
-            return false;
-        }
-
-        total_sent += sent;
-        
-        if (sent > 0 && total_sent < data_size)
-        {
-            LOG_TRACE("Partial send to client {}: sent {} bytes, {} remaining", 
-                           client_id, sent, data_size - total_sent);
-        }
+        LOG_ERROR("Failed to add server socket to epoll");
+        epoll_close(epoll_fd_);
+        epoll_fd_ = nullptr;
+        return false;
     }
-
-    LOG_TRACE("Successfully sent {} bytes to client {}", total_sent, client_id);
     return true;
 }
 
@@ -211,6 +229,8 @@ inline void TCPServerBase<DrivedT>::disconnect_client(int client_id)
 template<typename DrivedT>
 void TCPServerBase<DrivedT>::server_loop()
 {
+    detail::WorkerThreadId::Scope worker_scope(server_thread_id_);
+
     // Set CPU affinity if specified
     if (config_.cpu_affinity >= 0)
     {
@@ -226,26 +246,6 @@ void TCPServerBase<DrivedT>::server_loop()
         {
             LOG_INFO("Server thread pinned to CPU core {}", config_.cpu_affinity);
         }
-    }
-
-    // Create epoll instance using wepoll
-    epoll_fd_ = epoll_create1(0);
-    if (epoll_fd_ == nullptr)
-    {
-        LOG_ERROR("Failed to create epoll instance");
-        return;
-    }
-
-    // Add server socket to epoll
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.sock = server_socket_;  // Full-width SOCKET; data.fd would truncate 64-bit handles
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_socket_, &ev) < 0)
-    {
-        LOG_ERROR("Failed to add server socket to epoll");
-        epoll_close(epoll_fd_);
-        epoll_fd_ = nullptr;
-        return;
     }
 
     const int MAX_EVENTS = 64;
@@ -284,17 +284,15 @@ void TCPServerBase<DrivedT>::server_loop()
             }
             else
             {
-                // Data from client socket - O(1) lookup using socket_to_client_id_ map
-                auto it = socket_to_client_id_.find(sock);
-                if (it != socket_to_client_id_.end())
-                {
-                    handle_client_data(it->second, buffer);
-                }
+                const uint32_t flags = events[i].events;
+                dispatch_client_event(sock, (flags & EPOLLOUT) != 0, (flags & ~EPOLLOUT) != 0, buffer);
             }
         }
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
+    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    running_.store(false, std::memory_order_release);
     release_resources();
 }
 

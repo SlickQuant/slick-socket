@@ -23,6 +23,7 @@
 #pragma once
 
 #include <slick/socket/logger.h>
+#include <slick/socket/worker_thread.h>
 #include <vector>
 #include <thread>
 #include <string>
@@ -97,6 +98,13 @@ protected:
     // Returns false when called from the client thread, in which case cleanup is deferred.
     bool release_connection();
 
+    // Waits up to timeout_ms for `events` (POLLIN/POLLOUT) on the socket.
+    // Returns false on timeout; true when ready or on error (reported by the following recv/send).
+    bool wait_socket(short events, int timeout_ms) const;
+
+    // How long a blocked receive/send waits before re-checking connected_
+    static constexpr int poll_interval_ms = 1;
+
     // Resolves config_.server_address (IPv4 literal or hostname) to an IPv4 address
     bool resolve_server_address(in_addr& addr) const
     {
@@ -127,6 +135,7 @@ protected:
     std::atomic_bool connected_{false};
     std::atomic_bool destroying_{false};  // set by the base destructor to suppress callbacks
     std::thread client_thread_;
+    detail::WorkerThreadId client_thread_id_;
     SocketT socket_ = invalid_socket;
 };
 

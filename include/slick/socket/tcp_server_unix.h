@@ -39,6 +39,10 @@ inline TCPServerBase<DerivedT>::TCPServerBase(std::string name, const TCPServerC
 template<typename DerivedT>
 inline TCPServerBase<DerivedT>::~TCPServerBase()
 {
+    if (!detail::stopped_before_destroy(server_thread_, name_))
+    {
+        SLICK_SOCKET_ON_UNSAFE_DESTROY();
+    }
     stop();
 }
 
@@ -113,6 +117,14 @@ inline bool TCPServerBase<DerivedT>::start()
         config_.port = ntohs(server_addr.sin_port);
     }
 
+    // Set up the event loop here so a failure is reported by start() rather than a dead server thread
+    if (!create_event_loop())
+    {
+        close(server_socket_);
+        server_socket_ = -1;
+        return false;
+    }
+
     running_.store(true, std::memory_order_release);
 
     // Start single-threaded server loop
@@ -147,52 +159,86 @@ inline void TCPServerBase<DerivedT>::release_resources()
 }
 
 template<typename DerivedT>
-inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<uint8_t>& data)
+inline auto TCPServerBase<DerivedT>::write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent) -> SendStatus
 {
-    auto it = clients_.find(client_id);
-    if (it == clients_.end())
+    while (sent < size)
     {
+        ssize_t result = ::send(socket, data + sent, size - sent, MSG_NOSIGNAL);
+        if (result >= 0)
+        {
+            sent += static_cast<size_t>(result);
+            continue;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            return SendStatus::would_block;
+        }
+        LOG_ERROR("Failed to send data: {}", std::strerror(errno));
+        return SendStatus::failed;
+    }
+    return SendStatus::complete;
+}
+
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::set_write_interest(SocketT socket, bool enable)
+{
+#ifdef __APPLE__
+    struct kevent ev;
+    EV_SET(&ev, socket, EVFILT_WRITE, enable ? EV_ADD : EV_DELETE, 0, 0, 0);
+    return kevent(epoll_fd_, &ev, 1, nullptr, 0, nullptr) == 0;
+#else
+    struct epoll_event ev{};
+    ev.events = EPOLLIN | (enable ? EPOLLOUT : 0);
+    ev.data.fd = socket;
+    return epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, socket, &ev) == 0;
+#endif
+}
+
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::create_event_loop()
+{
+#ifdef __APPLE__
+    // macOS: Use kqueue
+    epoll_fd_ = kqueue();
+    if (epoll_fd_ < 0)
+    {
+        LOG_ERROR("Failed to create kqueue instance: {}", std::strerror(errno));
         return false;
     }
 
-    size_t total_sent = 0;
-    size_t data_size = data.size();
-    const uint8_t* buffer = data.data();
-
-    // Keep sending until all data is sent
-    while (total_sent < data_size)
+    struct kevent ev;
+    EV_SET(&ev, server_socket_, EVFILT_READ, EV_ADD, 0, 0, 0);
+    if (kevent(epoll_fd_, &ev, 1, nullptr, 0, nullptr) < 0)
     {
-        ssize_t sent = send(it->second.socket, buffer + total_sent, data_size - total_sent, MSG_NOSIGNAL);
-        if (sent < 0)
-        {
-            // Check for non-blocking specific errors
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                // Socket buffer is full, retry immediately
-                continue;
-            }
-
-            LOG_ERROR("Failed to send data to client {}: {}", client_id, std::strerror(errno));
-
-            // Check if connection is broken
-            if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN)
-            {
-                LOG_INFO("Connection lost during send to client {}, disconnecting", client_id);
-                disconnect_client(client_id);
-            }
-            return false;
-        }
-
-        total_sent += sent;
-        
-        if (sent > 0 && total_sent < data_size)
-        {
-            LOG_TRACE("Partial send to client {}: sent {} bytes, {} remaining", 
-                           client_id, sent, data_size - total_sent);
-        }
+        LOG_ERROR("Failed to add server socket to kqueue: {}", std::strerror(errno));
+        close(epoll_fd_);
+        epoll_fd_ = -1;
+        return false;
+    }
+#else
+    // Linux: Use epoll
+    epoll_fd_ = epoll_create1(0);
+    if (epoll_fd_ < 0)
+    {
+        LOG_ERROR("Failed to create epoll instance: {}", std::strerror(errno));
+        return false;
     }
 
-    LOG_TRACE("Successfully sent {} bytes to client {}", total_sent, client_id);
+    struct epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = server_socket_;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_socket_, &ev) < 0)
+    {
+        LOG_ERROR("Failed to add server socket to epoll: {}", std::strerror(errno));
+        close(epoll_fd_);
+        epoll_fd_ = -1;
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -223,6 +269,8 @@ inline void TCPServerBase<DerivedT>::disconnect_client(int client_id)
 template<typename DerivedT>
 void TCPServerBase<DerivedT>::server_loop()
 {
+    detail::WorkerThreadId::Scope worker_scope(server_thread_id_);
+
     // Set CPU affinity if specified
     if (config_.cpu_affinity >= 0)
     {
@@ -248,25 +296,6 @@ void TCPServerBase<DerivedT>::server_loop()
     }
 
 #ifdef __APPLE__
-    // macOS: Use kqueue
-    epoll_fd_ = kqueue();
-    if (epoll_fd_ < 0)
-    {
-        LOG_ERROR("Failed to create kqueue instance: {}", std::strerror(errno));
-        return;
-    }
-
-    // Add server socket to kqueue
-    struct kevent ev;
-    EV_SET(&ev, server_socket_, EVFILT_READ, EV_ADD, 0, 0, 0);
-    if (kevent(epoll_fd_, &ev, 1, nullptr, 0, nullptr) < 0)
-    {
-        LOG_ERROR("Failed to add server socket to kqueue: {}", std::strerror(errno));
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-        return;
-    }
-
     const int MAX_EVENTS = 64;
     struct kevent events[MAX_EVENTS];
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
@@ -305,38 +334,17 @@ void TCPServerBase<DerivedT>::server_loop()
             }
             else
             {
-                auto it = socket_to_client_id_.find(fd);
-                if (it != socket_to_client_id_.end())
-                {
-                    handle_client_data(it->second, buffer);
-                }
+                const bool writable = events[i].filter == EVFILT_WRITE;
+                dispatch_client_event(fd, writable, !writable, buffer);
             }
         }
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
+    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    running_.store(false, std::memory_order_release);
     release_resources();
 #else
-    // Linux: Use epoll
-    epoll_fd_ = epoll_create1(0);
-    if (epoll_fd_ < 0)
-    {
-        LOG_ERROR("Failed to create epoll instance: {}", std::strerror(errno));
-        return;
-    }
-
-    // Add server socket to epoll
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = server_socket_;
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_socket_, &ev) < 0)
-    {
-        LOG_ERROR("Failed to add server socket to epoll: {}", std::strerror(errno));
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-        return;
-    }
-
     const int MAX_EVENTS = 64;
     struct epoll_event events[MAX_EVENTS];
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
@@ -371,16 +379,15 @@ void TCPServerBase<DerivedT>::server_loop()
             }
             else
             {
-                auto it = socket_to_client_id_.find(events[i].data.fd);
-                if (it != socket_to_client_id_.end())
-                {
-                    handle_client_data(it->second, buffer);
-                }
+                const uint32_t flags = events[i].events;
+                dispatch_client_event(events[i].data.fd, (flags & EPOLLOUT) != 0, (flags & ~EPOLLOUT) != 0, buffer);
             }
         }
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
+    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    running_.store(false, std::memory_order_release);
     release_resources();
 #endif
 }

@@ -15,13 +15,13 @@
 namespace slick::socket
 {
 
-MulticastSender::MulticastSender(std::string name, const MulticastSenderConfig& config)
+inline MulticastSender::MulticastSender(std::string name, const MulticastSenderConfig& config)
     : name_(std::move(name)), config_(config)
 {
     LOG_DEBUG("MulticastSender {} created with address {}:{}", name_, config_.multicast_address, config_.port);
 }
 
-MulticastSender::~MulticastSender()
+inline MulticastSender::~MulticastSender()
 {
     if (running_.load(std::memory_order_relaxed))
     {
@@ -29,7 +29,7 @@ MulticastSender::~MulticastSender()
     }
 }
 
-bool MulticastSender::start()
+inline bool MulticastSender::start()
 {
     if (running_.load(std::memory_order_relaxed))
     {
@@ -55,7 +55,7 @@ bool MulticastSender::start()
     return true;
 }
 
-void MulticastSender::stop()
+inline void MulticastSender::stop()
 {
     if (!running_.load(std::memory_order_relaxed))
     {
@@ -70,7 +70,7 @@ void MulticastSender::stop()
     LOG_INFO("{} stopped", name_);
 }
 
-bool MulticastSender::send_data(const std::vector<uint8_t>& data)
+inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
 {
     if (!running_.load(std::memory_order_relaxed))
     {
@@ -125,7 +125,7 @@ bool MulticastSender::send_data(const std::vector<uint8_t>& data)
     return true;
 }
 
-bool MulticastSender::initialize_socket()
+inline bool MulticastSender::initialize_socket()
 {
     // Create UDP socket
     socket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -147,7 +147,7 @@ bool MulticastSender::initialize_socket()
     return true;
 }
 
-void MulticastSender::cleanup_socket()
+inline void MulticastSender::cleanup_socket()
 {
     if (socket_ != invalid_socket)
     {
@@ -156,7 +156,7 @@ void MulticastSender::cleanup_socket()
     }
 }
 
-bool MulticastSender::setup_multicast_options()
+inline bool MulticastSender::setup_multicast_options()
 {
     // Bind to local address for sending (required on some platforms like macOS)
     sockaddr_in local_addr{};

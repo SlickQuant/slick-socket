@@ -25,10 +25,13 @@ MulticastReceiverBase<DerivedT>::MulticastReceiverBase(std::string name, const M
 template<typename DerivedT>
 MulticastReceiverBase<DerivedT>::~MulticastReceiverBase()
 {
-    if (running_.load(std::memory_order_relaxed))
+    if (!detail::stopped_before_destroy(receiver_thread_, name_))
     {
-        stop();
+        SLICK_SOCKET_ON_UNSAFE_DESTROY();
     }
+
+    // Also joins a receiver thread that was stopped from within the callback
+    stop();
 }
 
 template<typename DerivedT>
@@ -38,6 +41,13 @@ bool MulticastReceiverBase<DerivedT>::start()
     {
         LOG_WARN("{} is already running", name_);
         return true;
+    }
+
+    // Reap a receiver thread that was stopped from within the callback
+    if (!join_receiver_thread())
+    {
+        LOG_ERROR("Cannot restart {} from within the receive callback", name_);
+        return false;
     }
 
     LOG_INFO("Starting {} for group {}:{}...", name_, config_.multicast_address, config_.port);
@@ -69,51 +79,30 @@ bool MulticastReceiverBase<DerivedT>::start()
 }
 
 template<typename DerivedT>
-void MulticastReceiverBase<DerivedT>::stop()
-{
-    if (!running_.load(std::memory_order_relaxed))
-    {
-        return;
-    }
-
-    LOG_INFO("Stopping {}...", name_);
-    running_.store(false, std::memory_order_relaxed);
-
-    // Wait for receiver thread to finish
-    if (receiver_thread_.joinable())
-    {
-        receiver_thread_.join();
-    }
-
-    leave_multicast_group();
-    cleanup_socket();
-
-    LOG_INFO("{} stopped", name_);
-}
-
-template<typename DerivedT>
 void MulticastReceiverBase<DerivedT>::receiver_loop()
 {
+    detail::WorkerThreadId::Scope worker_scope(receiver_thread_id_);
+
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
     sockaddr_in sender_addr{};
     socklen_t sender_addr_len = sizeof(sender_addr);
 
     LOG_DEBUG("Receiver loop started for {}", name_);
 
+    // Receive timeout bounds how long stop() waits; set it once rather than per packet
+    struct timeval timeout;
+    timeout.tv_sec = config_.receive_timeout.count() / 1000;
+    timeout.tv_usec = (config_.receive_timeout.count() % 1000) * 1000;
+    if (setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+    {
+        LOG_WARN("Failed to set receive timeout");
+    }
+
     while (running_.load(std::memory_order_relaxed))
     {
-        // Set socket timeout
-        struct timeval timeout;
-        timeout.tv_sec = config_.receive_timeout.count() / 1000;
-        timeout.tv_usec = (config_.receive_timeout.count() % 1000) * 1000;
-        
-        if (setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
-        {
-            LOG_WARN("Failed to set receive timeout");
-        }
-
-        ssize_t bytes_received = recvfrom(socket_, 
-                                         buffer.data(), 
+        sender_addr_len = sizeof(sender_addr);
+        ssize_t bytes_received = recvfrom(socket_,
+                                         buffer.data(),
                                          buffer.size(),
                                          0,
                                          reinterpret_cast<sockaddr*>(&sender_addr),
@@ -154,7 +143,20 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
         }
     }
 
+    // Release here so a stop() issued from the callback also cleans up
+    release_socket();
     LOG_DEBUG("Receiver loop ended for {}", name_);
+}
+
+template<typename DerivedT>
+void MulticastReceiverBase<DerivedT>::release_socket()
+{
+    if (socket_ == invalid_socket)
+    {
+        return;
+    }
+    leave_multicast_group();
+    cleanup_socket();
 }
 
 template<typename DerivedT>

@@ -15,6 +15,7 @@
 #include <csignal>
 #include <cstring>
 #include <pthread.h>
+#include <poll.h>
 
 namespace slick::socket
 {
@@ -30,6 +31,11 @@ inline TCPClientBase<DerivedT>::TCPClientBase(std::string name, const TCPClientC
 template<typename DerivedT>
 inline TCPClientBase<DerivedT>::~TCPClientBase()
 {
+    if (!detail::stopped_before_destroy(client_thread_, name_))
+    {
+        SLICK_SOCKET_ON_UNSAFE_DESTROY();
+    }
+
     // The derived object is already destroyed here, so the loop must not call back into it
     destroying_.store(true, std::memory_order_relaxed);
     disconnect();
@@ -145,14 +151,10 @@ inline void TCPClientBase<DerivedT>::disconnect()
 template<typename DerivedT>
 inline bool TCPClientBase<DerivedT>::release_connection()
 {
-    if (client_thread_.joinable())
+    if (!detail::join_unless_current(client_thread_, client_thread_id_))
     {
-        if (client_thread_.get_id() == std::this_thread::get_id())
-        {
-            // Called from a callback; the loop exits on its own and is joined later
-            return false;
-        }
-        client_thread_.join();
+        // Called from a callback; the loop exits on its own and is joined later
+        return false;
     }
 
     // Only close after the client thread is gone so it never reads a closed/reused descriptor
@@ -165,8 +167,17 @@ inline bool TCPClientBase<DerivedT>::release_connection()
 }
 
 template<typename DerivedT>
+inline bool TCPClientBase<DerivedT>::wait_socket(short events, int timeout_ms) const
+{
+    pollfd pfd{socket_, events, 0};
+    return ::poll(&pfd, 1, timeout_ms) != 0;
+}
+
+template<typename DerivedT>
 inline void TCPClientBase<DerivedT>::client_loop()
 {
+    detail::WorkerThreadId::Scope worker_scope(client_thread_id_);
+
     LOG_INFO("Client loop started");
 
     // Set CPU affinity if specified
@@ -199,8 +210,17 @@ inline void TCPClientBase<DerivedT>::client_loop()
     // Connection established - handle server communication
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
 
+    // Pinned to a core: spin on recv() for the lowest latency. Otherwise block in poll() until data
+    // arrives; the timeout only bounds how long disconnect() waits for this loop to notice.
+    const bool busy_poll = config_.cpu_affinity >= 0;
+
     while (connected_.load(std::memory_order_relaxed))
     {
+        if (!busy_poll && !wait_socket(POLLIN, poll_interval_ms))
+        {
+            continue;
+        }
+
         // Check for incoming data (non-blocking)
         ssize_t received = recv(socket_, (char*)buffer.data(), buffer.size(), 0);
 
@@ -272,9 +292,15 @@ inline bool TCPClientBase<DerivedT>::send_data(const std::vector<uint8_t>& data)
         if (sent < 0)
         {
             // Check for non-blocking specific errors
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
             {
-                // Socket buffer is full, retry immediately
+                // Socket buffer is full: block until the server drains it instead of spinning
+                if (!connected_.load(std::memory_order_relaxed))
+                {
+                    LOG_WARN("Connection closed while sending");
+                    return false;
+                }
+                wait_socket(POLLOUT, poll_interval_ms);
                 continue;
             }
 

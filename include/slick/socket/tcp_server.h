@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <string>
 #include <slick/socket/logger.h>
+#include <slick/socket/worker_thread.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <winsock2.h>
@@ -29,6 +30,9 @@ struct TCPServerConfig
     int receive_buffer_size = 4096;
     std::chrono::milliseconds connection_timeout{30000};
     int cpu_affinity = -1;  // -1 means no affinity, otherwise specify CPU core index
+    // Per-client cap on data queued while the peer is not reading. send_data() rejects a message
+    // (without sending any of it) once the queue would exceed this. 0 means unlimited.
+    size_t max_pending_send_bytes = 16 * 1024 * 1024;
 };
 
 template<typename DerivedT>
@@ -69,7 +73,8 @@ protected:
     void accept_new_client();
     void handle_client_data(int client_id, std::vector<uint8_t>& buffer);
 
-    // Send data to client
+    // Send data to client. Must be called on the server thread (i.e. from a server callback).
+    // Never blocks: data the socket cannot take right away is queued and flushed when it becomes writable.
     bool send_data(int client_id, const std::vector<uint8_t>& data);
     bool send_data(int client_id, const std::string& data)
     {
@@ -96,6 +101,17 @@ protected:
 
     void close_socket(SocketT socket);
 
+    // Creates the event loop handle and registers the listening socket
+    bool create_event_loop();
+
+    enum class SendStatus { complete, would_block, failed };
+
+    // Sends data[sent, size) until done or the socket would block; `sent` is advanced
+    SendStatus write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent);
+
+    // Enables/disables writability notifications for a client socket
+    bool set_write_interest(SocketT socket, bool enable);
+
     // Closes the listening socket, all client sockets and the event loop handle.
     // Must only be called while the server thread is not running.
     void release_resources();
@@ -109,15 +125,7 @@ protected:
     // Returns false in that case; the loop exits once the callback returns and releases resources itself.
     bool join_server_thread()
     {
-        if (server_thread_.joinable())
-        {
-            if (server_thread_.get_id() == std::this_thread::get_id())
-            {
-                return false;
-            }
-            server_thread_.join();
-        }
-        return true;
+        return detail::join_unless_current(server_thread_, server_thread_id_);
     }
 
 protected:
@@ -126,8 +134,36 @@ protected:
     {
         SocketT socket;
         std::string address;
+        std::vector<uint8_t> pending;   // data waiting for the socket to become writable
+        size_t pending_offset = 0;      // bytes of `pending` already sent
+
+        bool has_pending() const noexcept { return pending_offset < pending.size(); }
+        size_t pending_size() const noexcept { return pending.size() - pending_offset; }
     };
     using ClientMap = std::unordered_map<int, ClientInfo>;
+
+    bool queue_pending(typename ClientMap::iterator it, const uint8_t* data, size_t size);
+    void flush_pending(int client_id);
+
+    // Routes an event-loop notification for a client socket (server thread only)
+    void dispatch_client_event(SocketT socket, bool writable, bool readable, std::vector<uint8_t>& buffer)
+    {
+        auto it = socket_to_client_id_.find(socket);
+        if (it == socket_to_client_id_.end())
+        {
+            return;
+        }
+
+        const int client_id = it->second;  // copied: flushing may remove the client
+        if (writable)
+        {
+            flush_pending(client_id);
+        }
+        if (readable)
+        {
+            handle_client_data(client_id, buffer);
+        }
+    }
 
     // Closes the client's socket and removes it from the connection maps (server thread only)
     void remove_client(typename ClientMap::iterator it)
@@ -142,6 +178,7 @@ protected:
     std::atomic_bool running_{false};
 
     std::thread server_thread_;
+    detail::WorkerThreadId server_thread_id_;
     SocketT server_socket_ = invalid_socket;
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -178,6 +215,99 @@ inline void TCPServerBase<DerivedT>::stop()
     if (was_running)
     {
         LOG_INFO("{} stopped", name_);
+    }
+}
+
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<uint8_t>& data)
+{
+    auto it = clients_.find(client_id);
+    if (it == clients_.end())
+    {
+        return false;
+    }
+
+    ClientInfo& client = it->second;
+    size_t sent = 0;
+    if (!client.has_pending())
+    {
+        // Nothing queued, so ordering allows writing straight to the socket
+        switch (write_some(client.socket, data.data(), data.size(), sent))
+        {
+        case SendStatus::complete:
+            LOG_TRACE("Successfully sent {} bytes to client {}", sent, client_id);
+            return true;
+        case SendStatus::failed:
+            LOG_INFO("Connection lost during send to client {}, disconnecting", client_id);
+            remove_client(it);
+            return false;
+        case SendStatus::would_block:
+            break;
+        }
+    }
+    else if (config_.max_pending_send_bytes > 0 &&
+             client.pending_size() + data.size() > config_.max_pending_send_bytes)
+    {
+        LOG_WARN("Send queue for client {} is full ({} bytes pending), dropping {} bytes",
+                 client_id, client.pending_size(), data.size());
+        return false;
+    }
+
+    // The peer is not keeping up: queue the rest instead of spinning on the event thread
+    LOG_TRACE("Queued {} bytes for client {}", data.size() - sent, client_id);
+    return queue_pending(it, data.data() + sent, data.size() - sent);
+}
+
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::queue_pending(typename ClientMap::iterator it, const uint8_t* data, size_t size)
+{
+    ClientInfo& client = it->second;
+    const bool was_empty = !client.has_pending();
+    if (was_empty)
+    {
+        client.pending.clear();
+        client.pending_offset = 0;
+    }
+    else if (client.pending_offset > client.pending.size() / 2)
+    {
+        // Drop the already-sent prefix before growing the buffer
+        client.pending.erase(client.pending.begin(), client.pending.begin() + client.pending_offset);
+        client.pending_offset = 0;
+    }
+    client.pending.insert(client.pending.end(), data, data + size);
+
+    if (was_empty && !set_write_interest(client.socket, true))
+    {
+        LOG_ERROR("Failed to watch client {} for writability, disconnecting", it->first);
+        remove_client(it);
+        return false;
+    }
+    return true;
+}
+
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::flush_pending(int client_id)
+{
+    auto it = clients_.find(client_id);
+    if (it == clients_.end())
+    {
+        return;
+    }
+
+    ClientInfo& client = it->second;
+    switch (write_some(client.socket, client.pending.data(), client.pending.size(), client.pending_offset))
+    {
+    case SendStatus::would_block:
+        return;
+    case SendStatus::complete:
+        client.pending.clear();
+        client.pending_offset = 0;
+        set_write_interest(client.socket, false);
+        return;
+    case SendStatus::failed:
+        remove_client(it);
+        derived().onClientDisconnected(client_id);
+        return;
     }
 }
 

@@ -189,6 +189,8 @@ Server configuration notes:
 - `TCPServerConfig::max_connections` caps concurrent clients. Connections beyond the limit are accepted and closed immediately (the client sees a disconnect). A value `<= 0` means unlimited.
 - `stop()` may be called from a server callback: no further callbacks are dispatched, and the server thread closes its sockets once the callback returns. A later `start()` restarts the server.
 - `get_connected_client_count()` is safe to call from any thread.
+- `send_data()` never blocks the server thread. Data a slow client cannot take right away is queued per client and flushed when its socket becomes writable. Once `TCPServerConfig::max_pending_send_bytes` (default 16 MiB, `0` = unlimited) would be exceeded, `send_data()` returns `false` and drops that whole message, so the stream stays intact. Call `send_data()` / `disconnect_client()` on the server thread, i.e. from a server callback.
+- With `cpu_affinity` set, the server thread busy-polls for the lowest latency; otherwise it blocks in the event loop.
 
 ### Creating a TCP Client
 
@@ -240,7 +242,9 @@ int main()
 
 If the server closes the connection, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object.
 
-> **Lifetime:** destroying a connected client disconnects it without calling `onDisconnected()`, because the derived object is already gone by then. The base destructor only stops the worker thread after the derived destructor has run, so a callback that is already running (e.g. `onData()` on the client, or any server callback) can still overlap with derived members being destroyed. If your callbacks use derived members, call `disconnect()` / `stop()` in the derived destructor or before destruction.
+The client thread blocks in `poll()` while idle; setting `TCPClientConfig::cpu_affinity` pins it to a core and switches to busy-polling `recv()` for the lowest latency. `send_data()` blocks the calling thread (without spinning) until the server has accepted all of the data.
+
+> **Lifetime:** servers, clients and multicast receivers must be stopped (`stop()` / `disconnect()`, called from outside their worker thread) before the derived object is destroyed, e.g. in the derived destructor. This also applies after the server closed a client's connection or after `stop()` was called from a callback: the outside call joins the finished worker thread. The base destructor runs after the derived members are gone, so a callback still running at that point would touch destroyed state. Destroying a running object is reported: an error is logged and `SLICK_SOCKET_ON_UNSAFE_DESTROY()` is invoked, which asserts in debug builds. Define that macro before including any slick-socket header to handle it differently (e.g. throw or count). As a last-resort safety net, a client destroyed while connected skips `onDisconnected()`.
 
 ### Creating a Multicast Sender
 
@@ -314,6 +318,8 @@ int main()
 }
 ```
 
+`stop()` may be called from `handle_multicast_data()`; the receiver thread leaves the group and closes its socket once the callback returns.
+
 For more examples, see the [examples/](examples/) directory.
 
 ## Testing
@@ -365,6 +371,7 @@ slick-socket/
 │   ├── tcp_client.h          # TCP client base class
 │   ├── multicast_sender.h    # UDP multicast sender
 │   ├── multicast_receiver.h  # UDP multicast receiver
+│   ├── worker_thread.h       # Worker-thread identity helper (internal)
 │   └── logger.h              # Logger interface
 ├── src/                       # Implementation files (Windows-specific)
 ├── examples/                  # Usage examples

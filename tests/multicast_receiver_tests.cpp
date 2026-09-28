@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <slick/socket/multicast_receiver.h>
+#include <slick/socket/multicast_sender.h>
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -14,6 +15,9 @@ public:
 
     void handle_multicast_data(const std::vector<uint8_t>& data, const std::string& sender_address)
     {
+        if (stop_in_callback) {
+            stop();  // must not self-join the receiver thread
+        }
         data_received_count++;
         last_received_data = std::string(data.begin(), data.end());
         last_sender_address = sender_address;
@@ -22,6 +26,7 @@ public:
 
     std::atomic<int> data_received_count{0};
     std::atomic<bool> data_received_flag{false};
+    std::atomic<bool> stop_in_callback{false};
     std::string last_received_data;
     std::string last_sender_address;
 };
@@ -192,4 +197,44 @@ TEST_F(MulticastReceiverTest, ReceiverPortBinding) {
     EXPECT_TRUE(receiver_->is_running());
     
     receiver_->stop();
+}
+TEST_F(MulticastReceiverTest, StopFromReceiveCallback) {
+    config_.multicast_address = "224.0.0.102";
+    config_.port = 12347;
+    config_.receive_timeout = std::chrono::milliseconds(100);
+    receiver_ = std::make_unique<TestMulticastReceiver>("TestMulticastReceiver", config_);
+    receiver_->stop_in_callback = true;
+    ASSERT_TRUE(receiver_->start());
+
+    slick::socket::MulticastSenderConfig sender_config;
+    sender_config.multicast_address = config_.multicast_address;
+    sender_config.port = config_.port;
+    sender_config.enable_loopback = true;
+    slick::socket::MulticastSender sender("TestMulticastSender", sender_config);
+    ASSERT_TRUE(sender.start());
+
+    // Keep sending until the callback runs (multicast loopback may be unavailable)
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (receiver_->data_received_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        sender.send_data(std::string("stop"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (receiver_->data_received_count.load() == 0) {
+        GTEST_SKIP() << "Multicast loopback not available in this environment";
+    }
+
+    EXPECT_FALSE(receiver_->is_running());
+    EXPECT_EQ(receiver_->data_received_count.load(), 1);
+
+    // Restart joins the finished thread and receives again
+    receiver_->stop_in_callback = false;
+    ASSERT_TRUE(receiver_->start());
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (receiver_->data_received_count.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+        sender.send_data(std::string("again"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GE(receiver_->data_received_count.load(), 2);
+    receiver_->stop();
+    sender.stop();
 }

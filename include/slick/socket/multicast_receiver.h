@@ -5,6 +5,7 @@
 #pragma once
 
 #include <slick/socket/logger.h>
+#include <slick/socket/worker_thread.h>
 #include <vector>
 #include <string>
 #include <chrono>
@@ -73,6 +74,13 @@ protected:
     DerivedT& derived() { return static_cast<DerivedT&>(*this); }
     const DerivedT& derived() const { return static_cast<const DerivedT&>(*this); }
 
+    // Joins the receiver thread unless called from it (i.e. from handle_multicast_data()).
+    // Returns false in that case; the loop exits once the callback returns and releases the socket itself.
+    bool join_receiver_thread()
+    {
+        return detail::join_unless_current(receiver_thread_, receiver_thread_id_);
+    }
+
     // Virtual methods to be implemented by derived class
     void receiver_loop();
     void handle_multicast_data(const std::vector<uint8_t>& data, const std::string& sender_address);
@@ -91,6 +99,7 @@ protected:
 
     SocketT socket_ = invalid_socket;
     std::thread receiver_thread_;
+    detail::WorkerThreadId receiver_thread_id_;
     
     // Statistics
     std::atomic<uint64_t> packets_received_{0};
@@ -103,7 +112,34 @@ private:
     bool setup_multicast_options();
     bool join_multicast_group();
     void leave_multicast_group();
+
+    // Leaves the group and closes the socket (no-op when already released)
+    void release_socket();
 };
+
+template<typename DerivedT>
+void MulticastReceiverBase<DerivedT>::stop()
+{
+    const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
+    if (was_running)
+    {
+        LOG_INFO("Stopping {}...", name_);
+    }
+
+    // Wait for receiver thread to finish
+    if (!join_receiver_thread())
+    {
+        // Called from handle_multicast_data(); the loop exits after it returns and cleans up
+        return;
+    }
+
+    release_socket();
+
+    if (was_running)
+    {
+        LOG_INFO("{} stopped", name_);
+    }
+}
 
 } // namespace slick::socket
 
