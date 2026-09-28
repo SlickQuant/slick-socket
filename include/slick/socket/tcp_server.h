@@ -79,10 +79,11 @@ protected:
 
     // Connection management
     void disconnect_client(int client_id);
-    
+
+    // Safe to call from any thread: the count is maintained by the server thread
     size_t get_connected_client_count() const noexcept
-    {   
-        return clients_.size();
+    {
+        return client_count_.load(std::memory_order_relaxed);
     }
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -104,6 +105,21 @@ protected:
         return config_.max_connections > 0 && clients_.size() >= static_cast<size_t>(config_.max_connections);
     }
 
+    // Joins the server thread unless called from it (i.e. from a server callback).
+    // Returns false in that case; the loop exits once the callback returns and releases resources itself.
+    bool join_server_thread()
+    {
+        if (server_thread_.joinable())
+        {
+            if (server_thread_.get_id() == std::this_thread::get_id())
+            {
+                return false;
+            }
+            server_thread_.join();
+        }
+        return true;
+    }
+
 protected:
 
     struct ClientInfo
@@ -111,6 +127,15 @@ protected:
         SocketT socket;
         std::string address;
     };
+    using ClientMap = std::unordered_map<int, ClientInfo>;
+
+    // Closes the client's socket and removes it from the connection maps (server thread only)
+    void remove_client(typename ClientMap::iterator it)
+    {
+        close_socket(it->second.socket);
+        clients_.erase(it);
+        client_count_.store(clients_.size(), std::memory_order_relaxed);
+    }
 
     std::string name_;
     TCPServerConfig config_;
@@ -125,10 +150,36 @@ protected:
     HANDLE epoll_fd_ = nullptr;  // wepoll handle for Windows (epoll-like API)
 #endif
 
-    std::unordered_map<int, ClientInfo> clients_;
+    ClientMap clients_;
     std::unordered_map<SocketT, int> socket_to_client_id_;
+    std::atomic<size_t> client_count_{0};  // mirrors clients_.size() for readers on other threads
     std::atomic<int> next_client_id_{1};
 };
+
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::stop()
+{
+    const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
+    if (was_running)
+    {
+        LOG_INFO("Stopping {}...", name_);
+    }
+
+    // The server thread owns the sockets and connection maps while it runs,
+    // so it must finish before anything is released
+    if (!join_server_thread())
+    {
+        // Called from a server callback; the loop exits after it returns and cleans up
+        return;
+    }
+
+    release_resources();
+
+    if (was_running)
+    {
+        LOG_INFO("{} stopped", name_);
+    }
+}
 
 } // namespace slick::socket
 

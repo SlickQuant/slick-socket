@@ -29,6 +29,8 @@ inline TCPClientBase<DerivedT>::TCPClientBase(std::string name, const TCPClientC
 template<typename DerivedT>
 inline TCPClientBase<DerivedT>::~TCPClientBase()
 {
+    // The derived object is already destroyed here, so the loop must not call back into it
+    destroying_.store(true, std::memory_order_relaxed);
     disconnect();
     WSACleanup();
 }
@@ -232,7 +234,11 @@ inline void TCPClientBase<DerivedT>::client_loop()
         std::this_thread::yield();
     }
 
-    derived().onDisconnected();
+    // The acquire load pairs with the exchange in disconnect(), making destroying_ visible
+    if (!connected_.load(std::memory_order_acquire) && !destroying_.load(std::memory_order_relaxed))
+    {
+        derived().onDisconnected();
+    }
 
     // The socket is closed by release_connection() once this thread has been joined
     LOG_DEBUG("Client loop ended");

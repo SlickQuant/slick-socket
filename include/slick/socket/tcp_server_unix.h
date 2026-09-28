@@ -40,7 +40,6 @@ template<typename DerivedT>
 inline TCPServerBase<DerivedT>::~TCPServerBase()
 {
     stop();
-    release_resources();
 }
 
 template<typename DerivedT>
@@ -49,6 +48,13 @@ inline bool TCPServerBase<DerivedT>::start()
     if (running_.load(std::memory_order_relaxed))
     {
         return true;
+    }
+
+    // Reap a server thread that was stopped from within a callback
+    if (!join_server_thread())
+    {
+        LOG_ERROR("Cannot restart {} from within a server callback", name_);
+        return false;
     }
 
     LOG_INFO("Starting {}, lisening on: {}...", name_, config_.port);
@@ -117,28 +123,6 @@ inline bool TCPServerBase<DerivedT>::start()
 }
 
 template<typename DerivedT>
-inline void TCPServerBase<DerivedT>::stop()
-{
-    if (!running_.exchange(false, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    LOG_INFO("Stopping {}...", name_);
-
-    // The server thread owns the sockets and connection maps while it runs,
-    // so it must finish before anything is released
-    if (server_thread_.joinable())
-    {
-        server_thread_.join();
-    }
-
-    release_resources();
-
-    LOG_INFO("{} stopped", name_);
-}
-
-template<typename DerivedT>
 inline void TCPServerBase<DerivedT>::release_resources()
 {
     if (server_socket_ >= 0)
@@ -153,6 +137,7 @@ inline void TCPServerBase<DerivedT>::release_resources()
     }
     clients_.clear();
     socket_to_client_id_.clear();
+    client_count_.store(0, std::memory_order_relaxed);
 
     if (epoll_fd_ >= 0)
     {
@@ -231,8 +216,7 @@ inline void TCPServerBase<DerivedT>::disconnect_client(int client_id)
     auto it = clients_.find(client_id);
     if (it != clients_.end())
     {
-        close_socket(it->second.socket);
-        clients_.erase(it);
+        remove_client(it);
     }
 }
 
@@ -310,7 +294,8 @@ void TCPServerBase<DerivedT>::server_loop()
             break;
         }
 
-        for (int i = 0; i < num_events; i++)
+        // Stop dispatching as soon as a callback calls stop()
+        for (int i = 0; i < num_events && running_.load(std::memory_order_relaxed); i++)
         {
             int fd = static_cast<int>(events[i].ident);
             if (fd == server_socket_)
@@ -329,12 +314,8 @@ void TCPServerBase<DerivedT>::server_loop()
         }
     }
 
-    // Clean up
-    if (epoll_fd_ >= 0)
-    {
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-    }
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    release_resources();
 #else
     // Linux: Use epoll
     epoll_fd_ = epoll_create1(0);
@@ -380,7 +361,8 @@ void TCPServerBase<DerivedT>::server_loop()
             break;
         }
 
-        for (int i = 0; i < num_events; i++)
+        // Stop dispatching as soon as a callback calls stop()
+        for (int i = 0; i < num_events && running_.load(std::memory_order_relaxed); i++)
         {
             if (events[i].data.fd == server_socket_)
             {
@@ -398,12 +380,8 @@ void TCPServerBase<DerivedT>::server_loop()
         }
     }
 
-    // Clean up
-    if (epoll_fd_ >= 0)
-    {
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-    }
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    release_resources();
 #endif
 }
 
@@ -469,6 +447,7 @@ void TCPServerBase<DerivedT>::accept_new_client()
     // Add client to maps
     clients_[client_id] = {client_socket, client_address};
     socket_to_client_id_[client_socket] = client_id;
+    client_count_.store(clients_.size(), std::memory_order_relaxed);
 
     // Notify about new client
     derived().onClientConnected(client_id, client_address);
@@ -483,8 +462,7 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
         return;
     }
 
-    int socket = it->second.socket;
-    ssize_t received = recv(socket, buffer.data(), buffer.size(), 0);
+    ssize_t received = recv(it->second.socket, buffer.data(), buffer.size(), 0);
 
     if (received > 0)
     {
@@ -494,8 +472,7 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
     else if (received == 0)
     {
         // Client disconnected
-        close_socket(socket);
-        clients_.erase(it);
+        remove_client(it);
         // Notify about client disconnection
         derived().onClientDisconnected(client_id);
     }
@@ -505,8 +482,7 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
         if (errno != EAGAIN && errno != EWOULDBLOCK)
         {
             LOG_ERROR("Receive error for client ID={}", client_id);
-            close_socket(socket);
-            clients_.erase(it);
+            remove_client(it);
             derived().onClientDisconnected(client_id);
         }
     }

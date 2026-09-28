@@ -34,7 +34,6 @@ template<typename DrivedT>
 inline TCPServerBase<DrivedT>::~TCPServerBase()
 {
     stop();
-    release_resources();
     WSACleanup();
 }
 
@@ -44,6 +43,13 @@ inline bool TCPServerBase<DrivedT>::start()
     if (running_.load(std::memory_order_relaxed))
     {
         return true;
+    }
+
+    // Reap a server thread that was stopped from within a callback
+    if (!join_server_thread())
+    {
+        LOG_ERROR("Cannot restart {} from within a server callback", name_);
+        return false;
     }
 
     LOG_INFO("Starting {}, lisening on: {}...", name_, config_.port);
@@ -109,28 +115,6 @@ inline bool TCPServerBase<DrivedT>::start()
 }
 
 template<typename DrivedT>
-inline void TCPServerBase<DrivedT>::stop()
-{
-    if (!running_.exchange(false, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    LOG_INFO("Stopping {}...", name_);
-
-    // The server thread owns the sockets and connection maps while it runs,
-    // so it must finish before anything is released
-    if (server_thread_.joinable())
-    {
-        server_thread_.join();
-    }
-
-    release_resources();
-
-    LOG_INFO("{} stopped", name_);
-}
-
-template<typename DrivedT>
 inline void TCPServerBase<DrivedT>::release_resources()
 {
     if (server_socket_ != INVALID_SOCKET)
@@ -145,6 +129,7 @@ inline void TCPServerBase<DrivedT>::release_resources()
     }
     clients_.clear();
     socket_to_client_id_.clear();
+    client_count_.store(0, std::memory_order_relaxed);
 
     if (epoll_fd_ != nullptr)
     {
@@ -219,8 +204,7 @@ inline void TCPServerBase<DrivedT>::disconnect_client(int client_id)
     auto it = clients_.find(client_id);
     if (it != clients_.end())
     {
-        close_socket(it->second.socket);
-        clients_.erase(it);
+        remove_client(it);
     }
 }
 
@@ -255,8 +239,8 @@ void TCPServerBase<DrivedT>::server_loop()
     // Add server socket to epoll
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    ev.data.fd = (int)(intptr_t)server_socket_;  // Cast SOCKET to int for wepoll
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, (SOCKET)server_socket_, &ev) < 0)
+    ev.data.sock = server_socket_;  // Full-width SOCKET; data.fd would truncate 64-bit handles
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_socket_, &ev) < 0)
     {
         LOG_ERROR("Failed to add server socket to epoll");
         epoll_close(epoll_fd_);
@@ -288,10 +272,11 @@ void TCPServerBase<DrivedT>::server_loop()
             break;
         }
 
-        for (int i = 0; i < num_events; i++)
+        // Stop dispatching as soon as a callback calls stop()
+        for (int i = 0; i < num_events && running_.load(std::memory_order_relaxed); i++)
         {
-            SOCKET sock = (SOCKET)(intptr_t)events[i].data.fd;
-            
+            SOCKET sock = events[i].data.sock;
+
             if (sock == server_socket_)
             {
                 // New connection on server socket
@@ -309,12 +294,8 @@ void TCPServerBase<DrivedT>::server_loop()
         }
     }
 
-    // Clean up
-    if (epoll_fd_ != nullptr)
-    {
-        epoll_close(epoll_fd_);
-        epoll_fd_ = nullptr;
-    }
+    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up
+    release_resources();
 }
 
 template<typename DrivedT>
@@ -354,7 +335,7 @@ void TCPServerBase<DrivedT>::accept_new_client()
     struct epoll_event ev;
     // Read readiness only: an idle socket is always writable, so EPOLLOUT would wake the loop continuously
     ev.events = EPOLLIN | EPOLLRDHUP;
-    ev.data.fd = (int)(intptr_t)client_socket;
+    ev.data.sock = client_socket;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_socket, &ev) < 0)
     {
         LOG_ERROR("Failed to add client socket to epoll: {}", WSAGetLastError());
@@ -372,6 +353,7 @@ void TCPServerBase<DrivedT>::accept_new_client()
     // Add client to maps
     clients_[client_id] = {client_socket, client_address};
     socket_to_client_id_[client_socket] = client_id;
+    client_count_.store(clients_.size(), std::memory_order_relaxed);
 
     // Notify about new client
     derived().onClientConnected(client_id, client_address);
@@ -386,8 +368,7 @@ void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8
         return;
     }
 
-    SOCKET socket = it->second.socket;
-    int received = recv(socket, (char*)buffer.data(), (int)buffer.size(), 0);
+    int received = recv(it->second.socket, (char*)buffer.data(), (int)buffer.size(), 0);
 
     if (received > 0)
     {
@@ -396,8 +377,7 @@ void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8
     else if (received == 0)
     {
         // Client disconnected
-        close_socket(socket);
-        clients_.erase(it);
+        remove_client(it);
         // Notify about client disconnection
         derived().onClientDisconnected(client_id);
     }
@@ -408,8 +388,7 @@ void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8
         if (error != WSAEWOULDBLOCK)
         {
             LOG_ERROR("Receive error for client ID={}", client_id);
-            close_socket(socket);
-            clients_.erase(it);
+            remove_client(it);
             derived().onClientDisconnected(client_id);
         }
     }

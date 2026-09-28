@@ -34,6 +34,10 @@ public:
     }
 
     void onClientData(int client_id, const uint8_t* data, size_t length) {
+        if (stop_on_data) {
+            stop();  // stopping from within a callback must not self-join the server thread
+            return;
+        }
         data_received++;
         bytes_received += length;
         last_data_client_id = client_id;
@@ -58,6 +62,7 @@ public:
     std::atomic<int> disconnected_clients{0};
     std::atomic<int> data_received{0};
     std::atomic<size_t> bytes_received{0};
+    std::atomic<bool> stop_on_data{false};
     std::atomic<int> last_connected_client_id{-1};
     std::atomic<int> last_disconnected_client_id{-1};
     std::atomic<int> last_data_client_id{-1};
@@ -80,6 +85,9 @@ public:
     void onDisconnected() {
         disconnected_count++;
         connection_established = false;
+        if (external_disconnects) {
+            (*external_disconnects)++;
+        }
     }
 
     void onData(const uint8_t* data, size_t length) {
@@ -103,6 +111,7 @@ public:
     std::atomic<size_t> bytes_received{0};
     std::atomic<bool> connection_established{false};
     std::atomic<bool> data_received_flag{false};
+    std::atomic<int>* external_disconnects = nullptr;  // outlives the client, unlike the members above
 
 private:
     std::mutex data_mutex_;
@@ -384,4 +393,62 @@ TEST_F(TCPIntegrationTest, MaxConnectionsEnforced) {
 
     // Disconnect before destruction so onDisconnected() never runs on a partially destroyed client
     rejected->disconnect();
+}
+
+TEST_F(TCPIntegrationTest, StopFromServerCallback) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    server_->stop_on_data = true;
+    ASSERT_TRUE(client_->send_data(std::string("stop")));
+    ASSERT_TRUE(waitForCondition([this]() { return !server_->is_running(); }));
+
+    // The server thread releases its sockets on exit, so the client sees the close
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+    EXPECT_EQ(server_->get_connected_client_count(), 0u);
+
+    // Restarting joins the finished thread and listens on the same port again
+    server_->stop_on_data = false;
+    ASSERT_TRUE(server_->start());
+    ASSERT_TRUE(client_->connect());
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
+    ASSERT_TRUE(client_->send_data(std::string("restarted")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "restarted"; }));
+}
+
+// Destroying a connected client must not call onDisconnected() on the already-destroyed derived object
+TEST_F(TCPIntegrationTest, DestroyConnectedClientSkipsDisconnectCallback) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+
+    std::atomic<int> disconnects{0};
+    client_ = connectClient("IntegrationClient");
+    client_->external_disconnects = &disconnects;
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    client_.reset();
+    EXPECT_EQ(disconnects.load(), 0);
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+}
+
+// get_connected_client_count() is read here while the server thread adds and removes clients
+TEST_F(TCPIntegrationTest, ConnectedClientCountFromAnotherThread) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+
+    std::vector<std::unique_ptr<IntegrationTestClient>> clients;
+    for (int i = 0; i < 3; ++i) {
+        clients.push_back(connectClient("Client" + std::to_string(i)));
+    }
+    ASSERT_TRUE(waitForCondition([this]() { return server_->get_connected_client_count() == 3; }));
+
+    clients[0]->disconnect();
+    ASSERT_TRUE(waitForCondition([this]() { return server_->get_connected_client_count() == 2; }));
+
+    server_->stop();
+    EXPECT_EQ(server_->get_connected_client_count(), 0u);
+
+    for (auto& client : clients) {
+        EXPECT_TRUE(waitForCondition([&client]() { return !client->is_connected(); }));
+        client->disconnect();
+    }
 }

@@ -125,6 +125,7 @@ protected:
     std::string name_;
     TCPClientConfig config_;
     std::atomic_bool connected_{false};
+    std::atomic_bool destroying_{false};  // set by the base destructor to suppress callbacks
     std::thread client_thread_;
     SocketT socket_ = invalid_socket;
 };

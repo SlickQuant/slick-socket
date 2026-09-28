@@ -187,6 +187,8 @@ Server configuration notes:
 
 - Set `TCPServerConfig::port = 0` to let the OS pick a free port; `port()` returns the bound port after `start()`.
 - `TCPServerConfig::max_connections` caps concurrent clients. Connections beyond the limit are accepted and closed immediately (the client sees a disconnect). A value `<= 0` means unlimited.
+- `stop()` may be called from a server callback: no further callbacks are dispatched, and the server thread closes its sockets once the callback returns. A later `start()` restarts the server.
+- `get_connected_client_count()` is safe to call from any thread.
 
 ### Creating a TCP Client
 
@@ -238,7 +240,7 @@ int main()
 
 If the server closes the connection, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object.
 
-> **Lifetime:** call `stop()` / `disconnect()` before a derived server or client is destroyed. The base destructor also stops the worker thread, but by then the derived object's members are already destroyed, so callbacks such as `onDisconnected()` must not run against them.
+> **Lifetime:** destroying a connected client disconnects it without calling `onDisconnected()`, because the derived object is already gone by then. The base destructor only stops the worker thread after the derived destructor has run, so a callback that is already running (e.g. `onData()` on the client, or any server callback) can still overlap with derived members being destroyed. If your callbacks use derived members, call `disconnect()` / `stop()` in the derived destructor or before destruction.
 
 ### Creating a Multicast Sender
 
