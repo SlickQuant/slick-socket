@@ -24,7 +24,7 @@ namespace slick::socket
 struct TCPServerConfig
 {
     uint16_t port = 5000;
-    int max_connections = 100;
+    int max_connections = 100;  // connections beyond this are accepted and closed immediately; <= 0 means unlimited
     bool reuse_address = true;
     int receive_buffer_size = 4096;
     std::chrono::milliseconds connection_timeout{30000};
@@ -53,6 +53,12 @@ public:
     bool is_running() const noexcept
     {
         return running_.load(std::memory_order_relaxed);
+    }
+
+    // Listening port. When configured with port 0, this is the OS-assigned port after start().
+    uint16_t port() const noexcept
+    {
+        return config_.port;
     }
 
 protected:
@@ -88,6 +94,15 @@ protected:
 #endif
 
     void close_socket(SocketT socket);
+
+    // Closes the listening socket, all client sockets and the event loop handle.
+    // Must only be called while the server thread is not running.
+    void release_resources();
+
+    bool at_connection_limit() const noexcept
+    {
+        return config_.max_connections > 0 && clients_.size() >= static_cast<size_t>(config_.max_connections);
+    }
 
 protected:
 

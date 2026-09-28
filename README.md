@@ -178,9 +178,15 @@ int main()
     MyServer server;
     server.start();
     // ... server runs in background thread
+    server.stop();
     return 0;
 }
 ```
+
+Server configuration notes:
+
+- Set `TCPServerConfig::port = 0` to let the OS pick a free port; `port()` returns the bound port after `start()`.
+- `TCPServerConfig::max_connections` caps concurrent clients. Connections beyond the limit are accepted and closed immediately (the client sees a disconnect). A value `<= 0` means unlimited.
 
 ### Creating a TCP Client
 
@@ -213,7 +219,7 @@ public:
 int main()
 {
     slick::socket::TCPClientConfig config;
-    config.server_address = "127.0.0.1";
+    config.server_address = "127.0.0.1";   // IPv4 address or hostname (default: "localhost")
     config.server_port = 5000;
 
     MyClient client(config);
@@ -229,6 +235,10 @@ int main()
     return 0;
 }
 ```
+
+If the server closes the connection, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object.
+
+> **Lifetime:** call `stop()` / `disconnect()` before a derived server or client is destroyed. The base destructor also stops the worker thread, but by then the derived object's members are already destroyed, so callbacks such as `onDisconnected()` must not run against them.
 
 ### Creating a Multicast Sender
 

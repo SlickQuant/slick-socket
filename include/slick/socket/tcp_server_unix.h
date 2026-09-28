@@ -40,25 +40,7 @@ template<typename DerivedT>
 inline TCPServerBase<DerivedT>::~TCPServerBase()
 {
     stop();
-
-    if (server_socket_ >= 0)
-    {
-        close(server_socket_);
-        server_socket_ = -1;
-    }
-
-    for (auto& [id, client] : clients_)
-    {
-        close(client.socket);
-    }
-    clients_.clear();
-    socket_to_client_id_.clear();
-
-    if (epoll_fd_ >= 0)
-    {
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-    }
+    release_resources();
 }
 
 template<typename DerivedT>
@@ -118,6 +100,13 @@ inline bool TCPServerBase<DerivedT>::start()
         return false;
     }
 
+    // Record the actual port (resolves port 0 to the OS-assigned port)
+    socklen_t addr_len = sizeof(server_addr);
+    if (getsockname(server_socket_, (sockaddr*)&server_addr, &addr_len) == 0)
+    {
+        config_.port = ntohs(server_addr.sin_port);
+    }
+
     running_.store(true, std::memory_order_release);
 
     // Start single-threaded server loop
@@ -130,21 +119,34 @@ inline bool TCPServerBase<DerivedT>::start()
 template<typename DerivedT>
 inline void TCPServerBase<DerivedT>::stop()
 {
-    if (!running_.load(std::memory_order_relaxed))
+    if (!running_.exchange(false, std::memory_order_acq_rel))
     {
         return;
     }
 
     LOG_INFO("Stopping {}...", name_);
-    running_.store(false, std::memory_order_release);
 
+    // The server thread owns the sockets and connection maps while it runs,
+    // so it must finish before anything is released
+    if (server_thread_.joinable())
+    {
+        server_thread_.join();
+    }
+
+    release_resources();
+
+    LOG_INFO("{} stopped", name_);
+}
+
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::release_resources()
+{
     if (server_socket_ >= 0)
     {
         close(server_socket_);
         server_socket_ = -1;
     }
 
-    // Close all client sockets
     for (auto& [id, client] : clients_)
     {
         close(client.socket);
@@ -152,13 +154,11 @@ inline void TCPServerBase<DerivedT>::stop()
     clients_.clear();
     socket_to_client_id_.clear();
 
-    // Wait for server thread to finish
-    if (server_thread_.joinable())
+    if (epoll_fd_ >= 0)
     {
-        server_thread_.join();
+        close(epoll_fd_);
+        epoll_fd_ = -1;
     }
-
-    LOG_INFO("{} stopped", name_);
 }
 
 template<typename DerivedT>
@@ -423,6 +423,13 @@ void TCPServerBase<DerivedT>::accept_new_client()
         return;
     }
 
+    if (at_connection_limit())
+    {
+        LOG_WARN("Rejecting client: max_connections ({}) reached", config_.max_connections);
+        close(client_socket);
+        return;
+    }
+
     // Make client socket non-blocking
     int flags = fcntl(client_socket, F_GETFL, 0);
     if (flags >= 0)
@@ -442,7 +449,7 @@ void TCPServerBase<DerivedT>::accept_new_client()
     }
 #else
     struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;  // Edge-triggered mode
+    ev.events = EPOLLIN;  // Level-triggered: data left over after one recv() is reported again
     ev.data.fd = client_socket;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_socket, &ev) < 0)
     {

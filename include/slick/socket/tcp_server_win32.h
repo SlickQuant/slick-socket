@@ -34,26 +34,7 @@ template<typename DrivedT>
 inline TCPServerBase<DrivedT>::~TCPServerBase()
 {
     stop();
-
-    if (server_socket_ != INVALID_SOCKET)
-    {
-        closesocket(server_socket_);
-        server_socket_ = INVALID_SOCKET;
-    }
-
-    for (auto& [client_id, client_info] : clients_)
-    {
-        closesocket(client_info.socket);
-    }
-    clients_.clear();
-    socket_to_client_id_.clear();
-
-    if (epoll_fd_ != nullptr)
-    {
-        epoll_close(epoll_fd_);
-        epoll_fd_ = nullptr;
-    }
-
+    release_resources();
     WSACleanup();
 }
 
@@ -111,6 +92,13 @@ inline bool TCPServerBase<DrivedT>::start()
         return false;
     }
 
+    // Record the actual port (resolves port 0 to the OS-assigned port)
+    int addr_len = sizeof(server_addr);
+    if (getsockname(server_socket_, (sockaddr*)&server_addr, &addr_len) == 0)
+    {
+        config_.port = ntohs(server_addr.sin_port);
+    }
+
     running_.store(true, std::memory_order_release);
 
     // Start single-threaded server loop
@@ -123,21 +111,34 @@ inline bool TCPServerBase<DrivedT>::start()
 template<typename DrivedT>
 inline void TCPServerBase<DrivedT>::stop()
 {
-    if (!running_.load(std::memory_order_relaxed))
+    if (!running_.exchange(false, std::memory_order_acq_rel))
     {
         return;
     }
 
     LOG_INFO("Stopping {}...", name_);
-    running_.store(false, std::memory_order_release);
 
+    // The server thread owns the sockets and connection maps while it runs,
+    // so it must finish before anything is released
+    if (server_thread_.joinable())
+    {
+        server_thread_.join();
+    }
+
+    release_resources();
+
+    LOG_INFO("{} stopped", name_);
+}
+
+template<typename DrivedT>
+inline void TCPServerBase<DrivedT>::release_resources()
+{
     if (server_socket_ != INVALID_SOCKET)
     {
         closesocket(server_socket_);
         server_socket_ = INVALID_SOCKET;
     }
 
-    // Close all client sockets
     for (auto& [client_id, client_info] : clients_)
     {
         closesocket(client_info.socket);
@@ -145,20 +146,11 @@ inline void TCPServerBase<DrivedT>::stop()
     clients_.clear();
     socket_to_client_id_.clear();
 
-    // Wait for server thread to finish
-    if (server_thread_.joinable())
-    {
-        server_thread_.join();
-    }
-
-    // Clean up epoll
     if (epoll_fd_ != nullptr)
     {
         epoll_close(epoll_fd_);
         epoll_fd_ = nullptr;
     }
-
-    LOG_INFO("{} stopped", name_);
 }
 
 template<typename DrivedT>
@@ -268,6 +260,7 @@ void TCPServerBase<DrivedT>::server_loop()
     {
         LOG_ERROR("Failed to add server socket to epoll");
         epoll_close(epoll_fd_);
+        epoll_fd_ = nullptr;
         return;
     }
 
@@ -341,6 +334,13 @@ void TCPServerBase<DrivedT>::accept_new_client()
         return;
     }
 
+    if (at_connection_limit())
+    {
+        LOG_WARN("Rejecting client: max_connections ({}) reached", config_.max_connections);
+        closesocket(client_socket);
+        return;
+    }
+
     // Make client socket non-blocking
     u_long mode = 1; // non-blocking mode
     if (ioctlsocket(client_socket, FIONBIO, &mode) != 0)
@@ -352,7 +352,8 @@ void TCPServerBase<DrivedT>::accept_new_client()
 
     // Add client socket to epoll
     struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLRDHUP;
+    // Read readiness only: an idle socket is always writable, so EPOLLOUT would wake the loop continuously
+    ev.events = EPOLLIN | EPOLLRDHUP;
     ev.data.fd = (int)(intptr_t)client_socket;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_socket, &ev) < 0)
     {

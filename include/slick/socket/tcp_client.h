@@ -29,6 +29,11 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #endif
 
 namespace slick::socket
@@ -36,7 +41,7 @@ namespace slick::socket
 
 struct TCPClientConfig
 {
-    std::string server_address = "localhost";
+    std::string server_address = "localhost";   // IPv4 literal or hostname
     uint16_t server_port = 5000;
     int receive_buffer_size = 4096;
     std::chrono::milliseconds connection_timeout{30000};
@@ -87,6 +92,35 @@ protected:
 
     void client_loop();
     void handle_server_data(std::vector<uint8_t>& buffer);
+
+    // Joins the client thread (unless called from it) and closes the socket.
+    // Returns false when called from the client thread, in which case cleanup is deferred.
+    bool release_connection();
+
+    // Resolves config_.server_address (IPv4 literal or hostname) to an IPv4 address
+    bool resolve_server_address(in_addr& addr) const
+    {
+        // Fast path: numeric IPv4 address, no resolver round trip
+        if (inet_pton(AF_INET, config_.server_address.c_str(), &addr) == 1)
+        {
+            return true;
+        }
+
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        addrinfo* result = nullptr;
+        if (getaddrinfo(config_.server_address.c_str(), nullptr, &hints, &result) != 0 || result == nullptr)
+        {
+            return false;
+        }
+
+        addr = reinterpret_cast<const sockaddr_in*>(result->ai_addr)->sin_addr;
+        freeaddrinfo(result);
+        return true;
+    }
 
     std::string name_;
     TCPClientConfig config_;

@@ -41,6 +41,13 @@ inline bool TCPClientBase<DerivedT>::connect()
         return true;
     }
 
+    // Reap a previous connection that ended on its own (e.g. server closed it)
+    if (!release_connection())
+    {
+        LOG_ERROR("Cannot reconnect from within the client thread");
+        return false;
+    }
+
     // Create socket
     socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socket_ == invalid_socket)
@@ -54,6 +61,8 @@ inline bool TCPClientBase<DerivedT>::connect()
     if (flags < 0 || fcntl(socket_, F_SETFL, flags | O_NONBLOCK) < 0)
     {
         LOG_WARN("Failed to make socket non-blocking: {}", std::strerror(errno));
+        close(socket_);
+        socket_ = invalid_socket;
         return false;
     }
 
@@ -63,7 +72,7 @@ inline bool TCPClientBase<DerivedT>::connect()
     server_addr.sin_port = htons(config_.server_port);
 
     // Resolve server address
-    if (inet_pton(AF_INET, config_.server_address.c_str(), &server_addr.sin_addr) != 1)
+    if (!resolve_server_address(server_addr.sin_addr))
     {
         LOG_ERROR("Failed to resolve server address: {}", config_.server_address);
         close(socket_);
@@ -121,27 +130,36 @@ inline bool TCPClientBase<DerivedT>::connect()
 template<typename DerivedT>
 inline void TCPClientBase<DerivedT>::disconnect()
 {
-    if (!connected_.load(std::memory_order_relaxed))
+    // The client thread may already have cleared connected_ (server closed the connection),
+    // so the thread and socket are released regardless of the previous state.
+    const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
+
+    if (release_connection() && was_connected)
     {
-        return;
+        LOG_INFO("TCP client disconnected");
+    }
+}
+
+template<typename DerivedT>
+inline bool TCPClientBase<DerivedT>::release_connection()
+{
+    if (client_thread_.joinable())
+    {
+        if (client_thread_.get_id() == std::this_thread::get_id())
+        {
+            // Called from a callback; the loop exits on its own and is joined later
+            return false;
+        }
+        client_thread_.join();
     }
 
-    connected_.store(false, std::memory_order_release);
-
-    // Close socket if open
+    // Only close after the client thread is gone so it never reads a closed/reused descriptor
     if (socket_ != invalid_socket)
     {
         close(socket_);
         socket_ = invalid_socket;
     }
-
-    // Wait for client thread to finish
-    if (client_thread_.joinable())
-    {
-        client_thread_.join();
-    }
-
-    LOG_INFO("TCP client disconnected");
+    return true;
 }
 
 template<typename DerivedT>
@@ -211,9 +229,7 @@ inline void TCPClientBase<DerivedT>::client_loop()
 
     derived().onDisconnected();
 
-    // Connection lost - clean up
-    close(socket_);
-    socket_ = invalid_socket;
+    // The socket is closed by release_connection() once this thread has been joined
     LOG_INFO("Client loop ended");
 }
 

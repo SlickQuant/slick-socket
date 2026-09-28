@@ -41,6 +41,13 @@ inline bool TCPClientBase<DerivedT>::connect()
         return true;
     }
 
+    // Reap a previous connection that ended on its own (e.g. server closed it)
+    if (!release_connection())
+    {
+        LOG_ERROR("Cannot reconnect from within the client thread");
+        return false;
+    }
+
     // Create socket
     socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socket_ == invalid_socket)
@@ -65,7 +72,7 @@ inline bool TCPClientBase<DerivedT>::connect()
     server_addr.sin_port = htons(config_.server_port);
 
     // Resolve server address
-    if (inet_pton(AF_INET, config_.server_address.c_str(), &server_addr.sin_addr) != 1)
+    if (!resolve_server_address(server_addr.sin_addr))
     {
         LOG_ERROR("Failed to resolve server address: {}", config_.server_address);
         closesocket(socket_);
@@ -89,16 +96,19 @@ inline bool TCPClientBase<DerivedT>::connect()
         }
     }
 
-    // Wait for connection to complete
+    // Wait for connection to complete. Winsock reports a failed connect in the except set.
     fd_set write_fds;
     FD_ZERO(&write_fds);
     FD_SET(socket_, &write_fds);
+    fd_set except_fds;
+    FD_ZERO(&except_fds);
+    FD_SET(socket_, &except_fds);
 
     struct timeval timeout;
     timeout.tv_sec = static_cast<long>(config_.connection_timeout.count() / 1000);
     timeout.tv_usec = static_cast<long>((config_.connection_timeout.count() % 1000) * 1000);
 
-    result = select(static_cast<int>(socket_) + 1, nullptr, &write_fds, nullptr, &timeout);
+    result = select(static_cast<int>(socket_) + 1, nullptr, &write_fds, &except_fds, &timeout);
     if (result <= 0)
     {
         LOG_WARN("Connection timeout or failed");
@@ -106,7 +116,20 @@ inline bool TCPClientBase<DerivedT>::connect()
         socket_ = invalid_socket;
         return false;
     }
-    
+
+    // Check if connection was successful
+    int error = 0;
+    int len = sizeof(error);
+    if (FD_ISSET(socket_, &except_fds) ||
+        getsockopt(socket_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &len) == SOCKET_ERROR ||
+        error != 0)
+    {
+        LOG_WARN("Connection failed: error {}", error);
+        closesocket(socket_);
+        socket_ = invalid_socket;
+        return false;
+    }
+
     connected_.store(true, std::memory_order_release);
     client_thread_ = std::thread(&TCPClientBase::client_loop, this);
 
@@ -117,28 +140,40 @@ inline bool TCPClientBase<DerivedT>::connect()
 template<typename DerivedT>
 inline void TCPClientBase<DerivedT>::disconnect()
 {
-    if (!connected_.load(std::memory_order_relaxed))
+    // The client thread may already have cleared connected_ (server closed the connection),
+    // so the thread and socket are released regardless of the previous state.
+    const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
+    if (was_connected)
     {
-        return;
+        LOG_INFO("Disconnecting from {}:{}...", config_.server_address, config_.server_port);
     }
 
-    LOG_INFO("Disconnecting from {}:{}...", config_.server_address, config_.server_port);
-    connected_.store(false, std::memory_order_release);
+    if (release_connection() && was_connected)
+    {
+        LOG_INFO("Disconnected");
+    }
+}
 
-    // Close socket if open
+template<typename DerivedT>
+inline bool TCPClientBase<DerivedT>::release_connection()
+{
+    if (client_thread_.joinable())
+    {
+        if (client_thread_.get_id() == std::this_thread::get_id())
+        {
+            // Called from a callback; the loop exits on its own and is joined later
+            return false;
+        }
+        client_thread_.join();
+    }
+
+    // Only close after the client thread is gone so it never reads a closed/reused socket
     if (socket_ != invalid_socket)
     {
         closesocket(socket_);
         socket_ = invalid_socket;
     }
-
-    // Wait for client thread to finish
-    if (client_thread_.joinable())
-    {
-        client_thread_.join();
-    }
-
-    LOG_INFO("Disconnected");
+    return true;
 }
 
 template<typename DerivedT>
@@ -199,9 +234,7 @@ inline void TCPClientBase<DerivedT>::client_loop()
 
     derived().onDisconnected();
 
-    // Connection lost - clean up
-    closesocket(socket_);
-    socket_ = invalid_socket;
+    // The socket is closed by release_connection() once this thread has been joined
     LOG_DEBUG("Client loop ended");
 }
 
