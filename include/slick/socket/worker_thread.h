@@ -14,7 +14,8 @@
 // The base-class destructor runs after the derived object's members are destroyed, so a callback
 // running at that point touches destroyed state: call stop()/disconnect() before destruction
 // (e.g. in the derived destructor). Asserts in debug builds by default; define this macro before
-// including any slick-socket header to customize it (e.g. to throw or to count violations).
+// including any slick-socket header to customize it (e.g. to count violations or abort). It runs
+// inside a noexcept destructor, so it must not throw: an escaping exception calls std::terminate.
 #ifndef SLICK_SOCKET_ON_UNSAFE_DESTROY
 #define SLICK_SOCKET_ON_UNSAFE_DESTROY() \
     assert(!"slick-socket: call stop()/disconnect() before destroying the derived object")

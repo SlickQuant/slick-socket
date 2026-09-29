@@ -77,9 +77,9 @@ public:
 
     std::thread& server_thread() { return server_thread_; }
 
-    // Sends flood_payload to the client in 1 MiB messages from within a single callback
+    // Sends flood_payload to the client in flood_chunk-sized messages from within a single callback
     void flood(int client_id) {
-        constexpr size_t chunk = 1024 * 1024;
+        const size_t chunk = flood_chunk;
         for (size_t offset = 0; offset < flood_payload.size(); offset += chunk) {
             const size_t size = (std::min)(chunk, flood_payload.size() - offset);
             std::vector<uint8_t> message(flood_payload.begin() + offset, flood_payload.begin() + offset + size);
@@ -93,6 +93,7 @@ public:
     }
 
     std::vector<uint8_t> flood_payload;  // set before the flood is triggered
+    size_t flood_chunk = 1024 * 1024;
     std::atomic<size_t> flood_accepted{0};
     std::atomic<int> send_failures{0};
     std::atomic<bool> flood_done{false};
@@ -614,6 +615,31 @@ TEST_F(TCPIntegrationTest, PendingSendLimitRejectsMessages) {
     const size_t accepted = server_->flood_accepted.load();
     ASSERT_TRUE(waitForCondition([&]() { return client_->bytes_received.load() == accepted; }, 10000));
     EXPECT_TRUE(client_->received_data() == std::string(payload.begin(), payload.begin() + accepted));
+    EXPECT_TRUE(client_->is_connected());
+}
+
+// A first message larger than max_pending_send_bytes is rejected whole even though the queue is
+// empty; a partial direct write would otherwise queue the remainder past the limit
+TEST_F(TCPIntegrationTest, PendingSendLimitRejectsOversizedFirstMessage) {
+    server_config_.max_pending_send_bytes = 1024 * 1024;
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("SlowClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    const auto payload = make_payload(32 * 1024 * 1024);
+    server_->flood_payload = payload;
+    server_->flood_chunk = payload.size();  // one message, 32x the limit
+    client_->hold = true;
+    ASSERT_TRUE(client_->send_data(std::string("flood")));
+    ASSERT_TRUE(waitForCondition([this]() { return server_->flood_done.load(); }, 5000));
+    EXPECT_EQ(server_->send_failures.load(), 1);
+    EXPECT_EQ(server_->flood_accepted.load(), 0u);
+
+    // Nothing of the rejected message reaches the client, and messages within the limit still go through
+    client_->hold = false;
+    ASSERT_TRUE(client_->send_data(std::string("ping")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "ping"; }, 3000));
+    EXPECT_EQ(client_->bytes_received.load(), 4u);
     EXPECT_TRUE(client_->is_connected());
 }
 

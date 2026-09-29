@@ -31,7 +31,8 @@ struct TCPServerConfig
     std::chrono::milliseconds connection_timeout{30000};
     int cpu_affinity = -1;  // -1 means no affinity, otherwise specify CPU core index
     // Per-client cap on data queued while the peer is not reading. send_data() rejects a message
-    // (without sending any of it) once the queue would exceed this. 0 means unlimited.
+    // (without sending any of it) if the queue could exceed this, so a single message larger than
+    // this is always rejected. 0 means unlimited.
     size_t max_pending_send_bytes = 16 * 1024 * 1024;
 };
 
@@ -228,6 +229,17 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
     }
 
     ClientInfo& client = it->second;
+
+    // Checked before the direct write: once the kernel takes part of a message, the rest must be
+    // queued whatever its size, so admission can only be all-or-nothing up front
+    if (config_.max_pending_send_bytes > 0 &&
+        client.pending_size() + data.size() > config_.max_pending_send_bytes)
+    {
+        LOG_WARN("Send queue for client {} is full ({} bytes pending), dropping {} bytes",
+                 client_id, client.pending_size(), data.size());
+        return false;
+    }
+
     size_t sent = 0;
     if (!client.has_pending())
     {
@@ -244,13 +256,6 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
         case SendStatus::would_block:
             break;
         }
-    }
-    else if (config_.max_pending_send_bytes > 0 &&
-             client.pending_size() + data.size() > config_.max_pending_send_bytes)
-    {
-        LOG_WARN("Send queue for client {} is full ({} bytes pending), dropping {} bytes",
-                 client_id, client.pending_size(), data.size());
-        return false;
     }
 
     // The peer is not keeping up: queue the rest instead of spinning on the event thread
