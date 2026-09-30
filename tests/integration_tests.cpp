@@ -34,6 +34,9 @@ public:
     void onClientConnected(int client_id, const std::string& client_address) {
         connected_clients++;
         last_connected_client_id = client_id;
+        if (kick_on_connect) {
+            kick(client_id);
+        }
     }
 
     void onClientDisconnected(int client_id) {
@@ -41,7 +44,18 @@ public:
         last_disconnected_client_id = client_id;
     }
 
+    // Disconnects the client from within a callback; the notification must not re-enter this callback
+    void kick(int client_id) {
+        disconnect_client(client_id);
+        disconnect_client(client_id);  // already gone: must not notify twice
+        notified_during_kick = disconnected_clients.load() != 0;
+    }
+
     void onClientData(int client_id, const uint8_t* data, size_t length) {
+        if (length == 4 && std::memcmp(data, "kick", 4) == 0) {
+            kick(client_id);
+            return;
+        }
         if (stop_on_data) {
             stop();  // stopping from within a callback must not self-join the server thread
             return;
@@ -105,6 +119,8 @@ public:
     std::atomic<int> data_received{0};
     std::atomic<size_t> bytes_received{0};
     std::atomic<bool> stop_on_data{false};
+    std::atomic<bool> kick_on_connect{false};
+    std::atomic<bool> notified_during_kick{false};
     std::atomic<int> last_connected_client_id{-1};
     std::atomic<int> last_disconnected_client_id{-1};
     std::atomic<int> last_data_client_id{-1};
@@ -492,6 +508,37 @@ TEST_F(TCPIntegrationTest, StopFromServerCallback) {
     ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
     ASSERT_TRUE(client_->send_data(std::string("restarted")));
     ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "restarted"; }));
+}
+
+// disconnect_client() must report onClientDisconnected() exactly once, after the calling callback returns
+TEST_F(TCPIntegrationTest, ServerInitiatedDisconnectNotifies) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+    const int client_id = server_->last_connected_client_id.load();
+
+    ASSERT_TRUE(client_->send_data(std::string("kick")));
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+    EXPECT_EQ(server_->last_disconnected_client_id.load(), client_id);
+    EXPECT_FALSE(server_->notified_during_kick.load());
+    EXPECT_EQ(server_->get_connected_client_count(), 0u);
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+
+    // No duplicate notification arrives later
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(server_->disconnected_clients.load(), 1);
+}
+
+// A client disconnected from onClientConnected() is reported too
+TEST_F(TCPIntegrationTest, DisconnectFromConnectCallbackNotifies) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->kick_on_connect = true;
+    client_ = connectClient("IntegrationClient");
+
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+    EXPECT_EQ(server_->last_disconnected_client_id.load(), server_->last_connected_client_id.load());
+    EXPECT_FALSE(server_->notified_during_kick.load());
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
 }
 
 // Destroying a connected client must not call onDisconnected() on the already-destroyed derived object

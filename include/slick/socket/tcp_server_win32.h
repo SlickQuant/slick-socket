@@ -141,6 +141,7 @@ inline void TCPServerBase<DrivedT>::release_resources()
     }
     clients_.clear();
     socket_to_client_id_.clear();
+    disconnected_.clear();
     client_count_.store(0, std::memory_order_relaxed);
 
     if (epoll_fd_ != nullptr)
@@ -217,16 +218,6 @@ inline void TCPServerBase<DrivedT>::close_socket(SocketT socket)
 }
 
 template<typename DrivedT>
-inline void TCPServerBase<DrivedT>::disconnect_client(int client_id)
-{
-    auto it = clients_.find(client_id);
-    if (it != clients_.end())
-    {
-        remove_client(it);
-    }
-}
-
-template<typename DrivedT>
 void TCPServerBase<DrivedT>::server_loop()
 {
     detail::WorkerThreadId::Scope worker_scope(server_thread_id_);
@@ -287,6 +278,7 @@ void TCPServerBase<DrivedT>::server_loop()
                 const uint32_t flags = events[i].events;
                 dispatch_client_event(sock, (flags & EPOLLOUT) != 0, (flags & ~EPOLLOUT) != 0, buffer);
             }
+            after_event();
         }
     }
 
@@ -376,8 +368,6 @@ void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8
     {
         // Client disconnected
         remove_client(it);
-        // Notify about client disconnection
-        derived().onClientDisconnected(client_id);
     }
     else
     {
@@ -387,7 +377,6 @@ void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8
         {
             LOG_ERROR("Receive error for client ID={}", client_id);
             remove_client(it);
-            derived().onClientDisconnected(client_id);
         }
     }
 }

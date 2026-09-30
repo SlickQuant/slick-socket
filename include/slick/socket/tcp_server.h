@@ -83,7 +83,8 @@ protected:
         return send_data(client_id, buffer);
     }
 
-    // Connection management
+    // Closes the client's connection. Must be called on the server thread (i.e. from a server callback).
+    // onClientDisconnected() fires once the current callback returns.
     void disconnect_client(int client_id);
 
     // Safe to call from any thread: the count is maintained by the server thread
@@ -166,12 +167,37 @@ protected:
         }
     }
 
-    // Closes the client's socket and removes it from the connection maps (server thread only)
+    // Closes the client's socket and removes it from the connection maps (server thread only).
+    // Every removal goes through here and is reported once by notify_disconnected().
     void remove_client(typename ClientMap::iterator it)
     {
         close_socket(it->second.socket);
+        disconnected_.push_back(it->first);
         clients_.erase(it);
         client_count_.store(clients_.size(), std::memory_order_relaxed);
+    }
+
+    // Fires onClientDisconnected() for clients removed since the last call. Called by the server loop
+    // after each event, so a send_data()/disconnect_client() issued from a callback never re-enters
+    // user code (e.g. while it iterates its own client list).
+    void notify_disconnected()
+    {
+        // Index loop: a callback may remove more clients, which are reported in the same pass
+        for (size_t i = 0; i < disconnected_.size(); ++i)
+        {
+            const int client_id = disconnected_[i];  // copied: the callback may grow the vector
+            derived().onClientDisconnected(client_id);
+        }
+        disconnected_.clear();
+    }
+
+    // Runs after every dispatched event
+    void after_event()
+    {
+        if (!disconnected_.empty()) [[unlikely]]
+        {
+            notify_disconnected();
+        }
     }
 
     std::string name_;
@@ -190,6 +216,7 @@ protected:
 
     ClientMap clients_;
     std::unordered_map<SocketT, int> socket_to_client_id_;
+    std::vector<int> disconnected_;  // removed clients awaiting onClientDisconnected() (server thread only)
     std::atomic<size_t> client_count_{0};  // mirrors clients_.size() for readers on other threads
     std::atomic<int> next_client_id_{1};
 };
@@ -311,8 +338,17 @@ inline void TCPServerBase<DerivedT>::flush_pending(int client_id)
         return;
     case SendStatus::failed:
         remove_client(it);
-        derived().onClientDisconnected(client_id);
         return;
+    }
+}
+
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::disconnect_client(int client_id)
+{
+    auto it = clients_.find(client_id);
+    if (it != clients_.end())
+    {
+        remove_client(it);
     }
 }
 

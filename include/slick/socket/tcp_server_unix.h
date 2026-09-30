@@ -149,6 +149,7 @@ inline void TCPServerBase<DerivedT>::release_resources()
     }
     clients_.clear();
     socket_to_client_id_.clear();
+    disconnected_.clear();
     client_count_.store(0, std::memory_order_relaxed);
 
     if (epoll_fd_ >= 0)
@@ -257,16 +258,6 @@ inline void TCPServerBase<DerivedT>::close_socket(SocketT socket)
 }
 
 template<typename DerivedT>
-inline void TCPServerBase<DerivedT>::disconnect_client(int client_id)
-{
-    auto it = clients_.find(client_id);
-    if (it != clients_.end())
-    {
-        remove_client(it);
-    }
-}
-
-template<typename DerivedT>
 void TCPServerBase<DerivedT>::server_loop()
 {
     detail::WorkerThreadId::Scope worker_scope(server_thread_id_);
@@ -337,6 +328,7 @@ void TCPServerBase<DerivedT>::server_loop()
                 const bool writable = events[i].filter == EVFILT_WRITE;
                 dispatch_client_event(fd, writable, !writable, buffer);
             }
+            after_event();
         }
     }
 
@@ -382,6 +374,7 @@ void TCPServerBase<DerivedT>::server_loop()
                 const uint32_t flags = events[i].events;
                 dispatch_client_event(events[i].data.fd, (flags & EPOLLOUT) != 0, (flags & ~EPOLLOUT) != 0, buffer);
             }
+            after_event();
         }
     }
 
@@ -480,8 +473,6 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
     {
         // Client disconnected
         remove_client(it);
-        // Notify about client disconnection
-        derived().onClientDisconnected(client_id);
     }
     else
     {
@@ -490,7 +481,6 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
         {
             LOG_ERROR("Receive error for client ID={}", client_id);
             remove_client(it);
-            derived().onClientDisconnected(client_id);
         }
     }
 }
