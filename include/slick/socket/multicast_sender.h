@@ -34,13 +34,11 @@ public:
     explicit MulticastSender(std::string name, const MulticastSenderConfig& config = MulticastSenderConfig());
     virtual ~MulticastSender();
 
-    // Delete copy operations
+    // Neither copyable nor movable: the object owns its socket
     MulticastSender(const MulticastSender&) = delete;
     MulticastSender& operator=(const MulticastSender&) = delete;
-
-    // Move operations
-    MulticastSender(MulticastSender&& other) noexcept = default;
-    MulticastSender& operator=(MulticastSender&& other) noexcept = default;
+    MulticastSender(MulticastSender&&) = delete;
+    MulticastSender& operator=(MulticastSender&&) = delete;
 
     // Sender control
     bool start();

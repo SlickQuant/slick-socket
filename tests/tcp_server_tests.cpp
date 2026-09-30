@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <type_traits>
 #include <slick/socket/tcp_server.h>
 #include <thread>
 #include <chrono>
@@ -25,6 +26,11 @@ public:
     std::atomic<int> disconnected_clients{0};
     std::atomic<int> data_received{0};
 };
+
+// Objects own sockets and a worker thread that captures `this`, so moving one would leave two
+// owners of the same OS resources
+static_assert(!std::is_move_constructible_v<TestServer>);
+static_assert(!std::is_move_assignable_v<TestServer>);
 
 class TCPServerTest : public ::testing::Test {
 protected:

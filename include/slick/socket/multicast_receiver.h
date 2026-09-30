@@ -37,13 +37,11 @@ public:
     explicit MulticastReceiverBase(std::string name, const MulticastReceiverConfig& config = MulticastReceiverConfig());
     virtual ~MulticastReceiverBase();
 
-    // Delete copy operations
+    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
     MulticastReceiverBase(const MulticastReceiverBase&) = delete;
     MulticastReceiverBase& operator=(const MulticastReceiverBase&) = delete;
-
-    // Move operations
-    MulticastReceiverBase(MulticastReceiverBase&& other) noexcept = default;
-    MulticastReceiverBase& operator=(MulticastReceiverBase&& other) noexcept = default;
+    MulticastReceiverBase(MulticastReceiverBase&&) = delete;
+    MulticastReceiverBase& operator=(MulticastReceiverBase&&) = delete;
 
     // Receiver control
     bool start();

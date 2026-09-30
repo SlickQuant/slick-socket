@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <type_traits>
 #include <slick/socket/multicast_receiver.h>
 #include <slick/socket/multicast_sender.h>
 #include <thread>
@@ -30,6 +31,11 @@ public:
     std::string last_received_data;
     std::string last_sender_address;
 };
+
+// Objects own sockets and a worker thread that captures `this`, so moving one would leave two
+// owners of the same OS resources
+static_assert(!std::is_move_constructible_v<TestMulticastReceiver>);
+static_assert(!std::is_move_assignable_v<TestMulticastReceiver>);
 
 class MulticastReceiverTest : public ::testing::Test {
 protected:

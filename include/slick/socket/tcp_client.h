@@ -56,13 +56,11 @@ public:
     explicit TCPClientBase(std::string name, const TCPClientConfig& config = TCPClientConfig());
     virtual ~TCPClientBase();
 
-    // Delete copy operations
+    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
     TCPClientBase(const TCPClientBase&) = delete;
     TCPClientBase& operator=(const TCPClientBase&) = delete;
-
-    // Move operations
-    TCPClientBase(TCPClientBase&& other) noexcept = default;
-    TCPClientBase& operator=(TCPClientBase&& other) noexcept = default;
+    TCPClientBase(TCPClientBase&&) = delete;
+    TCPClientBase& operator=(TCPClientBase&&) = delete;
 
     bool connect();
     void disconnect();

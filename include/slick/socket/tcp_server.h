@@ -46,13 +46,11 @@ public:
     explicit TCPServerBase(std::string name, const TCPServerConfig& config = TCPServerConfig());
     virtual ~TCPServerBase();
 
-    // Delete copy operations
+    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
     TCPServerBase(const TCPServerBase&) = delete;
     TCPServerBase& operator=(const TCPServerBase&) = delete;
-
-    // Move operations
-    TCPServerBase(TCPServerBase&& other) noexcept = default;
-    TCPServerBase& operator=(TCPServerBase&& other) noexcept = default;
+    TCPServerBase(TCPServerBase&&) = delete;
+    TCPServerBase& operator=(TCPServerBase&&) = delete;
 
     // Server control
     bool start();

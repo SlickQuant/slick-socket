@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <type_traits>
 #include <slick/socket/tcp_client.h>
 #include <thread>
 #include <chrono>
@@ -27,6 +28,11 @@ public:
     std::atomic<int> data_received_count{0};
     std::string last_received_data;
 };
+
+// Objects own sockets and a worker thread that captures `this`, so moving one would leave two
+// owners of the same OS resources
+static_assert(!std::is_move_constructible_v<TestClient>);
+static_assert(!std::is_move_assignable_v<TestClient>);
 
 class TCPClientTest : public ::testing::Test {
 protected:

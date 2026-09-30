@@ -1,7 +1,12 @@
 #include <gtest/gtest.h>
+#include <type_traits>
 #include <slick/socket/multicast_sender.h>
 #include <thread>
 #include <chrono>
+
+// The sender owns its socket, so moving one would leave two owners of the same OS resource
+static_assert(!std::is_move_constructible_v<slick::socket::MulticastSender>);
+static_assert(!std::is_move_assignable_v<slick::socket::MulticastSender>);
 
 class MulticastSenderTest : public ::testing::Test {
 protected:
