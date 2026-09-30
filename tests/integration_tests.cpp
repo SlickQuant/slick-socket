@@ -56,6 +56,10 @@ public:
             kick(client_id);
             return;
         }
+        if (length == 4 && std::memcmp(data, "push", 4) == 0) {
+            send_data(push_target.load(), std::string("tick"));  // server-initiated traffic to another client
+            return;
+        }
         if (stop_on_data) {
             stop();  // stopping from within a callback must not self-join the server thread
             return;
@@ -121,6 +125,7 @@ public:
     std::atomic<bool> stop_on_data{false};
     std::atomic<bool> kick_on_connect{false};
     std::atomic<bool> notified_during_kick{false};
+    std::atomic<int> push_target{-1};
     std::atomic<int> last_connected_client_id{-1};
     std::atomic<int> last_disconnected_client_id{-1};
     std::atomic<int> last_data_client_id{-1};
@@ -236,7 +241,6 @@ protected:
         server_config_.port = 0;
         server_config_.max_connections = 10;
         server_config_.receive_buffer_size = 4096;
-        server_config_.connection_timeout = std::chrono::milliseconds(5000);
 
         client_config_.server_address = "127.0.0.1";
         client_config_.server_port = 0; // Set from server_->port() after the server starts
@@ -539,6 +543,75 @@ TEST_F(TCPIntegrationTest, DisconnectFromConnectCallbackNotifies) {
     EXPECT_EQ(server_->last_disconnected_client_id.load(), server_->last_connected_client_id.load());
     EXPECT_FALSE(server_->notified_during_kick.load());
     ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+}
+
+// A client with no traffic for idle_timeout is disconnected and reported
+TEST_F(TCPIntegrationTest, IdleClientIsDisconnected) {
+    server_config_.idle_timeout = std::chrono::milliseconds(200);
+    ASSERT_NO_FATAL_FAILURE(startServer());
+
+    const auto start = std::chrono::steady_clock::now();
+    client_ = connectClient("IdleClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+    EXPECT_GE(std::chrono::steady_clock::now() - start, server_config_.idle_timeout);
+    EXPECT_EQ(server_->last_disconnected_client_id.load(), server_->last_connected_client_id.load());
+    EXPECT_EQ(server_->get_connected_client_count(), 0u);
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+}
+
+// Received data resets the idle timer
+TEST_F(TCPIntegrationTest, ReceivingKeepsClientAlive) {
+    server_config_.idle_timeout = std::chrono::milliseconds(300);
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->echo = false;  // only inbound traffic counts here
+    client_ = connectClient("ActiveClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    for (int i = 0; i < 20; ++i) {  // ~1s, over 3x the timeout
+        ASSERT_TRUE(client_->send_data(std::string("beat")));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_EQ(server_->disconnected_clients.load(), 0);
+    EXPECT_TRUE(client_->is_connected());
+
+    // Reaped once it goes quiet
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+}
+
+// A receive-only client stays connected while the server keeps sending to it
+TEST_F(TCPIntegrationTest, SendingKeepsClientAlive) {
+    server_config_.idle_timeout = std::chrono::milliseconds(300);
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->echo = false;
+
+    auto listener = connectClient("Listener");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+    server_->push_target = server_->last_connected_client_id.load();
+    client_ = connectClient("Driver");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
+
+    // The driver's "push" makes the server send to the listener, which itself never sends
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_TRUE(client_->send_data(std::string("push")));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_EQ(server_->disconnected_clients.load(), 0);
+    EXPECT_TRUE(listener->is_connected());
+    EXPECT_GT(listener->bytes_received.load(), 0u);
+
+    listener->disconnect();
+}
+
+// With the default idle_timeout (off), a silent client is never reaped
+TEST_F(TCPIntegrationTest, IdleTimeoutOffByDefault) {
+    EXPECT_EQ(slick::socket::TCPServerConfig{}.idle_timeout.count(), 0);
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IdleClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(server_->disconnected_clients.load(), 0);
+    EXPECT_TRUE(client_->is_connected());
 }
 
 // Destroying a connected client must not call onDisconnected() on the already-destroyed derived object

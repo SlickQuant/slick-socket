@@ -314,6 +314,8 @@ void TCPServerBase<DerivedT>::server_loop()
             break;
         }
 
+        begin_iteration();
+
         // Stop dispatching as soon as a callback calls stop()
         for (int i = 0; i < num_events && running_.load(std::memory_order_relaxed); i++)
         {
@@ -330,6 +332,8 @@ void TCPServerBase<DerivedT>::server_loop()
             }
             after_event();
         }
+
+        end_iteration();
     }
 
     // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
@@ -361,6 +365,8 @@ void TCPServerBase<DerivedT>::server_loop()
             break;
         }
 
+        begin_iteration();
+
         // Stop dispatching as soon as a callback calls stop()
         for (int i = 0; i < num_events && running_.load(std::memory_order_relaxed); i++)
         {
@@ -376,6 +382,8 @@ void TCPServerBase<DerivedT>::server_loop()
             }
             after_event();
         }
+
+        end_iteration();
     }
 
     // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
@@ -441,16 +449,7 @@ void TCPServerBase<DerivedT>::accept_new_client()
     char addr_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, addr_str, INET_ADDRSTRLEN);
 
-    uint32_t client_id = next_client_id_.fetch_add(1);
-    std::string client_address = addr_str;
-
-    // Add client to maps
-    clients_[client_id] = {client_socket, client_address};
-    socket_to_client_id_[client_socket] = client_id;
-    client_count_.store(clients_.size(), std::memory_order_relaxed);
-
-    // Notify about new client
-    derived().onClientConnected(client_id, client_address);
+    register_client(client_socket, addr_str);
 }
 
 template<typename DerivedT>
@@ -466,6 +465,7 @@ void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint
 
     if (received > 0)
     {
+        it->second.last_activity = loop_now_;  // before the callback, which may remove the client
         // Process received data
         derived().onClientData(client_id, buffer.data(), received);
     }

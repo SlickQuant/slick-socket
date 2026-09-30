@@ -32,7 +32,6 @@ protected:
         config_.port = 0; // Use any available port
         config_.max_connections = 10;
         config_.receive_buffer_size = 4096;
-        config_.connection_timeout = std::chrono::milliseconds(1000);
     }
 
     void TearDown() override {
@@ -86,7 +85,7 @@ TEST_F(TCPServerTest, ConfigurationValidation) {
     valid_config.port = 8080;
     valid_config.max_connections = 100;
     valid_config.receive_buffer_size = 8192;
-    valid_config.connection_timeout = std::chrono::milliseconds(5000);
+    valid_config.idle_timeout = std::chrono::milliseconds(5000);
 
     server_ = std::make_unique<TestServer>("TestServer", valid_config);
     // Server creation should succeed

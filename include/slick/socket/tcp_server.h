@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -28,7 +29,9 @@ struct TCPServerConfig
     int max_connections = 100;  // connections beyond this are accepted and closed immediately; <= 0 means unlimited
     bool reuse_address = true;
     int receive_buffer_size = 4096;
-    std::chrono::milliseconds connection_timeout{30000};
+    // Disconnects a client after this long with no traffic in either direction: nothing received and
+    // no send progress. Reported through onClientDisconnected(). 0 (the default) disables it.
+    std::chrono::milliseconds idle_timeout{0};
     int cpu_affinity = -1;  // -1 means no affinity, otherwise specify CPU core index
     // Per-client cap on data queued while the peer is not reading. send_data() rejects a message
     // (without sending any of it) if the queue could exceed this, so a single message larger than
@@ -132,12 +135,15 @@ protected:
 
 protected:
 
+    using Clock = std::chrono::steady_clock;
+
     struct ClientInfo
     {
         SocketT socket;
         std::string address;
-        std::vector<uint8_t> pending;   // data waiting for the socket to become writable
-        size_t pending_offset = 0;      // bytes of `pending` already sent
+        Clock::time_point last_activity;  // last receive or send progress; only kept with idle_timeout on
+        std::vector<uint8_t> pending;     // data waiting for the socket to become writable
+        size_t pending_offset = 0;        // bytes of `pending` already sent
 
         bool has_pending() const noexcept { return pending_offset < pending.size(); }
         size_t pending_size() const noexcept { return pending.size() - pending_offset; }
@@ -146,6 +152,48 @@ protected:
 
     bool queue_pending(typename ClientMap::iterator it, const uint8_t* data, size_t size);
     void flush_pending(int client_id);
+
+    // Adds an accepted, event-loop-registered socket to the connection maps and notifies the derived class
+    void register_client(SocketT socket, std::string address)
+    {
+        const int client_id = next_client_id_.fetch_add(1, std::memory_order_relaxed);
+        ClientInfo& client = clients_[client_id];
+        client.socket = socket;
+        client.address = address;
+        client.last_activity = loop_now_;
+        socket_to_client_id_[socket] = client_id;
+        client_count_.store(clients_.size(), std::memory_order_relaxed);
+
+        // Passes the local copy: the callback may disconnect the client, destroying its ClientInfo
+        derived().onClientConnected(client_id, address);
+    }
+
+    bool idle_timeout_enabled() const noexcept
+    {
+        return config_.idle_timeout.count() > 0;
+    }
+
+    // Runs after the event wait returns, before dispatching. The clock is only read with idle_timeout on,
+    // once per iteration, and every activity stamp in the iteration reuses it.
+    void begin_iteration()
+    {
+        if (idle_timeout_enabled())
+        {
+            loop_now_ = Clock::now();
+        }
+    }
+
+    // Runs after an iteration's events are dispatched
+    void end_iteration()
+    {
+        if (idle_timeout_enabled() && loop_now_ >= next_idle_check_ && running_.load(std::memory_order_relaxed))
+        {
+            reap_idle_clients();
+            after_event();
+        }
+    }
+
+    void reap_idle_clients();
 
     // Routes an event-loop notification for a client socket (server thread only)
     void dispatch_client_event(SocketT socket, bool writable, bool readable, std::vector<uint8_t>& buffer)
@@ -169,12 +217,14 @@ protected:
 
     // Closes the client's socket and removes it from the connection maps (server thread only).
     // Every removal goes through here and is reported once by notify_disconnected().
-    void remove_client(typename ClientMap::iterator it)
+    // Returns the iterator following the removed client.
+    typename ClientMap::iterator remove_client(typename ClientMap::iterator it)
     {
         close_socket(it->second.socket);
         disconnected_.push_back(it->first);
-        clients_.erase(it);
+        auto next = clients_.erase(it);
         client_count_.store(clients_.size(), std::memory_order_relaxed);
+        return next;
     }
 
     // Fires onClientDisconnected() for clients removed since the last call. Called by the server loop
@@ -217,6 +267,8 @@ protected:
     ClientMap clients_;
     std::unordered_map<SocketT, int> socket_to_client_id_;
     std::vector<int> disconnected_;  // removed clients awaiting onClientDisconnected() (server thread only)
+    Clock::time_point loop_now_{};         // time the current loop iteration started (idle_timeout on only)
+    Clock::time_point next_idle_check_{};  // earliest time reap_idle_clients() can find an idle client
     std::atomic<size_t> client_count_{0};  // mirrors clients_.size() for readers on other threads
     std::atomic<int> next_client_id_{1};
 };
@@ -271,7 +323,12 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
     if (!client.has_pending())
     {
         // Nothing queued, so ordering allows writing straight to the socket
-        switch (write_some(client.socket, data.data(), data.size(), sent))
+        const SendStatus status = write_some(client.socket, data.data(), data.size(), sent);
+        if (sent != 0)
+        {
+            client.last_activity = loop_now_;
+        }
+        switch (status)
         {
         case SendStatus::complete:
             LOG_TRACE("Successfully sent {} bytes to client {}", sent, client_id);
@@ -327,7 +384,13 @@ inline void TCPServerBase<DerivedT>::flush_pending(int client_id)
     }
 
     ClientInfo& client = it->second;
-    switch (write_some(client.socket, client.pending.data(), client.pending.size(), client.pending_offset))
+    const size_t offset_before = client.pending_offset;
+    const SendStatus status = write_some(client.socket, client.pending.data(), client.pending.size(), client.pending_offset);
+    if (client.pending_offset != offset_before)
+    {
+        client.last_activity = loop_now_;
+    }
+    switch (status)
     {
     case SendStatus::would_block:
         return;
@@ -340,6 +403,31 @@ inline void TCPServerBase<DerivedT>::flush_pending(int client_id)
         remove_client(it);
         return;
     }
+}
+
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::reap_idle_clients()
+{
+    const auto timeout = std::chrono::duration_cast<Clock::duration>(config_.idle_timeout);
+    auto next_expiry = loop_now_ + timeout;
+    for (auto it = clients_.begin(); it != clients_.end();)
+    {
+        const auto expiry = it->second.last_activity + timeout;
+        if (expiry <= loop_now_)
+        {
+            LOG_INFO("Client {} idle for {} ms, disconnecting", it->first, config_.idle_timeout.count());
+            it = remove_client(it);
+        }
+        else
+        {
+            next_expiry = (std::min)(next_expiry, expiry);
+            ++it;
+        }
+    }
+
+    // Sleep until the earliest survivor could expire, but rescan at most 8 times per timeout period,
+    // so clients that keep pushing their expiry back cannot make the O(n) scan run every iteration
+    next_idle_check_ = (std::max)(next_expiry, loop_now_ + timeout / 8);
 }
 
 template<typename DerivedT>

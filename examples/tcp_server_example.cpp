@@ -35,7 +35,7 @@ int main()
     config.port = 9090; // Set custom port if needed
     config.max_connections = 50; // Set max connections
     config.receive_buffer_size = 8192; // Set receive buffer size
-    config.connection_timeout = std::chrono::milliseconds(60000); // Set connection timeout
+    config.idle_timeout = std::chrono::milliseconds(60000); // Disconnect clients idle for 60 s
 
     TCPServer server(config);
 
