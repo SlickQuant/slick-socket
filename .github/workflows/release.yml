@@ -33,11 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up CMake
-        uses: lukka/get-cmake@v3.29.0
-        with:
-          cmake-version: '3.25.x'
-
+      # Use the runner's preinstalled CMake: a pinned older CMake does not know the Visual Studio on
+      # windows-latest and silently falls back to NMake, which is not on PATH
       - name: Configure CMake
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SLICK_SOCKET_TESTING=OFF -DBUILD_SLICK_SOCKET_EXAMPLES=OFF
