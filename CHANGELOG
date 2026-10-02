@@ -1,3 +1,39 @@
+#v1.1.0 - [10/02/2026]
+Breaking changes:
+- Replaced the unused `TCPServerConfig::connection_timeout` with `idle_timeout` (default 0 = disabled), which disconnects clients with no traffic in either direction
+- Deleted the move constructor and move assignment of `TCPServerBase`, `TCPClientBase`, `MulticastSender` and `MulticastReceiverBase`
+- TCP server and client no longer install a process-wide `SIGPIPE` handler; writes to a closed peer fail via `MSG_NOSIGNAL` / `SO_NOSIGPIPE` instead
+- CMake no longer forces `CMAKE_BUILD_TYPE=Release` or adds global `DEBUG`/`NDEBUG` definitions
+
+TCP server:
+- `send_data()` never blocks the server thread: data a slow client cannot take is queued per client and flushed when the socket becomes writable
+- Added `TCPServerConfig::max_pending_send_bytes` (default 16 MiB) to cap each client's send queue; a message that would exceed it is rejected whole
+- `max_connections` is now enforced (`<= 0` = unlimited); connections beyond it are closed immediately
+- `port = 0` binds a free port; added `port()` to read the bound port
+- `onClientDisconnected()` fires exactly once for every client that leaves, including `disconnect_client()`, failed sends and idle timeouts, and never from inside another callback
+- `stop()` may be called from server callbacks, and a stopped server can be restarted
+- `get_connected_client_count()` is safe to call from any thread
+
+TCP client:
+- `server_address` accepts hostnames as well as IPv4 literals
+- `send_data()` is lock-free and safe from any number of threads, including concurrently with `disconnect()`; it waits for socket room without spinning
+- `onConnected()` runs on the `connect()` thread before the client thread starts; calling `disconnect()` from it makes `connect()` return `false`
+- The client thread blocks in `poll()` when idle instead of busy-looping; it busy-polls only when `cpu_affinity` is set
+- A disconnected client can reconnect by calling `connect()` again
+
+Multicast:
+- `MulticastSender::send_data()` is lock-free and safe concurrently with `stop()`, and returns within about 1 ms of `stop()` when the send buffer is full
+- `MulticastReceiverBase::stop()` may be called from `handle_multicast_data()`
+
+General:
+- Fixed TCP client/server shutdown races, partial reads and connection-count races
+- Destroying a server, client or receiver that is still running logs an error and invokes the overridable `SLICK_SOCKET_ON_UNSAFE_DESTROY()` hook (asserts in debug builds)
+- Default no-op `LOG_*` macros reference their arguments, so log-only variables do not trigger unused warnings
+- Headers compile cleanly at `/W4` and `-Wall -Wextra -Wpedantic`; added `SLICK_SOCKET_WARNINGS_AS_ERRORS` option for tests and examples
+- `slick::socket` propagates C++20 to consumers via `cxx_std_20`
+- Release archives contain the `cmake --install` tree with CMake package files; the Windows archive includes `wepoll.h` and Debug (`wepoll_libd`) and Release (`wepoll_lib`) libraries
+- Added real-network integration tests
+
 #v1.0.6 - [02/06/2026]
 - Removed shared build. There is no exports
 - Converted to truly header-only library (INTERFACE target on all platforms)

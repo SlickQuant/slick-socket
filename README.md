@@ -54,7 +54,7 @@ set(BUILD_SLICK_SOCKET_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     slick-socket
     GIT_REPOSITORY https://github.com/SlickQuant/slick-socket.git
-    GIT_TAG v1.0.6  # Use the desired version
+    GIT_TAG v1.1.0  # Use the desired version
 )
 
 FetchContent_MakeAvailable(slick-socket)
@@ -106,12 +106,12 @@ The Windows wepoll libraries are built with MSVC and the dynamic C runtime (`/MD
    cmake --build build --config Release
    ```
 
-3. **Copy to your project**:
+3. **Install (optional)**:
    ```bash
-   cp -r build/dist/include/slick /path/to/your/project/include/
+   cmake --install build --prefix /path/to/install
    ```
 
-   The library is header-only on Unix/Linux/macOS platforms, so only headers are needed.
+   The library is header-only and has no dependencies on Unix/Linux/macOS, so copying `include/slick` into your project works as well.
 
 #### Windows (Visual Studio)
 
@@ -202,7 +202,6 @@ Server configuration notes:
 - `stop()` may be called from a server callback: no further callbacks are dispatched, and the server thread closes its sockets once the callback returns. A later `start()` restarts the server.
 - `TCPServerConfig::idle_timeout` disconnects a client after that long with no traffic in either direction (nothing received and no send progress), and reports it through `onClientDisconnected()`. A receive-only client stays connected as long as the server keeps sending to it and it keeps reading. Idle clients are closed within 1/8 of the timeout after it expires. `0` (the default) disables it.
 - `onClientDisconnected()` fires exactly once for every client that leaves, whether the peer closed, an I/O error occurred, or the server called `disconnect_client()`. A disconnect triggered from a callback, including a failed `send_data()`, is reported after that callback returns, never from inside it. Clients still connected when the server stops are closed without this callback.
-- `get_connected_client_count()` is safe to call from any thread.
 - slick-socket never changes the process's signal handling. On Unix, writing to a peer that has closed the connection fails the send (and disconnects) instead of raising `SIGPIPE`, using `MSG_NOSIGNAL` and, where available (macOS/BSD), `SO_NOSIGPIPE` on each TCP socket. This applies to `TCPClientBase` too.
 - `send_data()` never blocks the server thread. Data a slow client cannot take right away is queued per client and flushed when its socket becomes writable. If queuing a message could exceed `TCPServerConfig::max_pending_send_bytes` (default 16 MiB, `0` = unlimited), `send_data()` returns `false` and drops that whole message before writing any of it, so the stream stays intact. A single message larger than the limit is therefore always rejected. Call `send_data()` / `disconnect_client()` on the server thread, i.e. from a server callback.
 - With `cpu_affinity` set, the server thread busy-polls for the lowest latency; otherwise it blocks in the event loop.
@@ -411,6 +410,8 @@ slick-socket/
 │   ├── multicast_receiver.h  # UDP multicast receiver
 │   ├── *_win32.h / *_unix.h  # Platform implementations, included by the headers above
 │   ├── worker_thread.h       # Worker-thread identity helper (internal)
+│   ├── send_gate.h           # Lock-free guard keeping a socket open during send_data() (internal)
+│   ├── socket_options_unix.h # SIGPIPE suppression per socket (internal)
 │   └── logger.h              # Logger interface
 ├── cmake/                     # CMake package config template
 ├── examples/                  # Usage examples
