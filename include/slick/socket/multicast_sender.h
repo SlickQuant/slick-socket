@@ -5,6 +5,7 @@
 #pragma once
 
 #include "logger.h"
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <chrono>

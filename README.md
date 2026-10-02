@@ -74,6 +74,18 @@ find_package(slick-socket REQUIRED)
 target_link_libraries(your_target PRIVATE slick::socket)
 ```
 
+Linking `slick::socket` (installed, `FetchContent`, or `add_subdirectory`) compiles `your_target` as C++20 or later; there is no need to set `CMAKE_CXX_STANDARD` yourself.
+
+### Using a Release Archive
+
+Each [GitHub release](https://github.com/SlickQuant/slick-socket/releases) has a Linux, macOS and Windows archive containing the `cmake --install` output: the headers and the CMake package files. The Windows archive also includes `wepoll.h` plus Debug (`wepoll_libd.lib`) and Release (`wepoll_lib.lib`) builds of wepoll, so nothing else needs to be installed. Extract it anywhere and point CMake at it, then use the `find_package` snippet above:
+
+```bash
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/extracted/slick-socket
+```
+
+The Windows wepoll libraries are built with MSVC and the dynamic C runtime (`/MD`, `/MDd`).
+
 ### From Source
 
 #### Prerequisites
@@ -191,6 +203,7 @@ Server configuration notes:
 - `TCPServerConfig::idle_timeout` disconnects a client after that long with no traffic in either direction (nothing received and no send progress), and reports it through `onClientDisconnected()`. A receive-only client stays connected as long as the server keeps sending to it and it keeps reading. Idle clients are closed within 1/8 of the timeout after it expires. `0` (the default) disables it.
 - `onClientDisconnected()` fires exactly once for every client that leaves, whether the peer closed, an I/O error occurred, or the server called `disconnect_client()`. A disconnect triggered from a callback, including a failed `send_data()`, is reported after that callback returns, never from inside it. Clients still connected when the server stops are closed without this callback.
 - `get_connected_client_count()` is safe to call from any thread.
+- slick-socket never changes the process's signal handling. On Unix, writing to a peer that has closed the connection fails the send (and disconnects) instead of raising `SIGPIPE`, using `MSG_NOSIGNAL` and, where available (macOS/BSD), `SO_NOSIGPIPE` on each TCP socket. This applies to `TCPClientBase` too.
 - `send_data()` never blocks the server thread. Data a slow client cannot take right away is queued per client and flushed when its socket becomes writable. If queuing a message could exceed `TCPServerConfig::max_pending_send_bytes` (default 16 MiB, `0` = unlimited), `send_data()` returns `false` and drops that whole message before writing any of it, so the stream stays intact. A single message larger than the limit is therefore always rejected. Call `send_data()` / `disconnect_client()` on the server thread, i.e. from a server callback.
 - With `cpu_affinity` set, the server thread busy-polls for the lowest latency; otherwise it blocks in the event loop.
 

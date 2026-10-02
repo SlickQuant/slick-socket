@@ -16,13 +16,31 @@ static std::atomic<int> g_unsafe_destroys{0};
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <signal.h>
 #include <time.h>
 #endif
+
+// Called from a callback after the peer closed the connection but before the event loop has seen it.
+// The first write draws a reset from the peer, so a later one fails with EPIPE/ECONNRESET, which must
+// be reported as a failed send rather than raised as SIGPIPE. Returns whether a send failed.
+template<typename SendFn>
+static bool write_until_send_fails(SendFn send)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // let the peer's close arrive
+    for (int i = 0; i < 20; ++i) {
+        if (!send()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
 
 class IntegrationTestServer : public slick::socket::TCPServerBase<IntegrationTestServer>
 {
@@ -54,6 +72,16 @@ public:
     void onClientData(int client_id, const uint8_t* data, size_t length) {
         if (length == 4 && std::memcmp(data, "kick", 4) == 0) {
             kick(client_id);
+            return;
+        }
+        if (length == 9 && std::memcmp(data, "send-late", 9) == 0) {
+            // The client closes right after sending this
+            late_send_failed = write_until_send_fails([&]() { return send_data(client_id, std::string("late")); });
+            return;
+        }
+        if (length == 3 && std::memcmp(data, "bye", 3) == 0) {
+            send_data(client_id, std::string("bye"));
+            disconnect_client(client_id);
             return;
         }
         if (length == 4 && std::memcmp(data, "push", 4) == 0) {
@@ -126,6 +154,7 @@ public:
     std::atomic<bool> kick_on_connect{false};
     std::atomic<bool> notified_during_kick{false};
     std::atomic<int> push_target{-1};
+    std::atomic<bool> late_send_failed{false};
     std::atomic<int> last_connected_client_id{-1};
     std::atomic<int> last_disconnected_client_id{-1};
     std::atomic<int> last_data_client_id{-1};
@@ -154,6 +183,11 @@ public:
     }
 
     void onData(const uint8_t* data, size_t length) {
+        if (length == 3 && std::memcmp(data, "bye", 3) == 0) {
+            // The server closed the connection right after sending this
+            late_send_failed = write_until_send_fails([this]() { return send_data(std::string("late")); });
+            return;
+        }
         while (hold) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));  // simulate a slow reader
         }
@@ -181,6 +215,7 @@ public:
     std::atomic<bool> data_received_flag{false};
     std::atomic<int>* external_disconnects = nullptr;  // outlives the client, unlike the members above
     std::atomic<bool> hold{false};
+    std::atomic<bool> late_send_failed{false};
 
 private:
     std::mutex data_mutex_;
@@ -233,6 +268,34 @@ static void expect_mostly_idle(std::thread& thread, const char* what)
         << what << " used " << std::chrono::duration_cast<std::chrono::milliseconds>(cpu_used).count()
         << "ms of CPU in " << window.count() << "ms";
 }
+
+#if !defined(_WIN32) && !defined(_WIN64)
+// Puts SIGPIPE at its default disposition (terminate the process) for a test's duration, so a write
+// that raises it ends the test run instead of being masked, and restores the previous disposition after
+class DefaultSigpipe
+{
+public:
+    DefaultSigpipe() {
+        struct sigaction action{};
+        action.sa_handler = SIG_DFL;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGPIPE, &action, &saved_);
+    }
+    ~DefaultSigpipe() { sigaction(SIGPIPE, &saved_, nullptr); }
+
+    DefaultSigpipe(const DefaultSigpipe&) = delete;
+    DefaultSigpipe& operator=(const DefaultSigpipe&) = delete;
+
+    static bool is_default() {
+        struct sigaction current{};
+        sigaction(SIGPIPE, nullptr, &current);
+        return current.sa_handler == SIG_DFL;
+    }
+
+private:
+    struct sigaction saved_{};
+};
+#endif
 
 class TCPIntegrationTest : public ::testing::Test {
 protected:
@@ -612,6 +675,62 @@ TEST_F(TCPIntegrationTest, IdleTimeoutOffByDefault) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     EXPECT_EQ(server_->disconnected_clients.load(), 0);
     EXPECT_TRUE(client_->is_connected());
+}
+
+// Runs each test, including teardown, with SIGPIPE at its default disposition. POSIX only.
+class TCPSigpipeTest : public TCPIntegrationTest {
+protected:
+    void SetUp() override {
+#if defined(_WIN32) || defined(_WIN64)
+        GTEST_SKIP() << "SIGPIPE is POSIX-only";
+#else
+        default_sigpipe_.emplace();
+        TCPIntegrationTest::SetUp();
+#endif
+    }
+
+#if !defined(_WIN32) && !defined(_WIN64)
+    void TearDown() override {
+        TCPIntegrationTest::TearDown();
+        default_sigpipe_.reset();
+    }
+
+    std::optional<DefaultSigpipe> default_sigpipe_;
+#endif
+};
+
+// Creating, starting and connecting TCP objects must leave the process's SIGPIPE disposition alone
+TEST_F(TCPSigpipeTest, TcpObjectsLeaveSigpipeDispositionAlone) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+#if !defined(_WIN32) && !defined(_WIN64)
+    EXPECT_TRUE(DefaultSigpipe::is_default());
+#endif
+}
+
+// The server writing to a client that already closed gets a failed send, not SIGPIPE
+TEST_F(TCPSigpipeTest, ServerWriteToClosedPeerDoesNotRaiseSigpipe) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    ASSERT_TRUE(client_->send_data(std::string("send-late")));
+    client_->disconnect();
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+    EXPECT_TRUE(server_->late_send_failed.load());
+}
+
+// The client writing to a server that already closed the connection gets a failed send, not SIGPIPE
+TEST_F(TCPSigpipeTest, ClientWriteToClosedPeerDoesNotRaiseSigpipe) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    ASSERT_TRUE(client_->send_data(std::string("bye")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+    EXPECT_TRUE(client_->late_send_failed.load());
+    EXPECT_FALSE(client_->is_connected());
 }
 
 // Destroying a connected client must not call onDisconnected() on the already-destroyed derived object

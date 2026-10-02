@@ -4,7 +4,10 @@
 
 #pragma once
 
+#if !defined(_WIN32) && !defined(_WIN64)
+
 #include "multicast_receiver.h"
+#include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -315,3 +318,5 @@ void MulticastReceiverBase<DerivedT>::leave_multicast_group()
 }
 
 } // namespace slick::socket
+
+#endif // !defined(_WIN32) && !defined(_WIN64)

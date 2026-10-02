@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <slick/socket/logger.h>
 #include <slick/socket/worker_thread.h>
 #include <vector>

@@ -14,10 +14,21 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            archive_ext: tar.gz
+            configs: Release
           - os: windows-latest
+            archive_ext: zip
+            # wepoll is a compiled library on Windows; ship both builds so Debug consumers get a matching C runtime
+            configs: Debug Release
           - os: macos-latest
+            archive_ext: tar.gz
+            configs: Release
 
     runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
@@ -31,42 +42,34 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SLICK_SOCKET_TESTING=OFF -DBUILD_SLICK_SOCKET_EXAMPLES=OFF
 
-      - name: Build
+      # The archive is exactly the install tree: headers, the CMake package for find_package(slick-socket)
+      # and, on Windows, the wepoll header and libraries
+      - name: Build and Install
         run: |
-          cmake --build build --config Release
+          for config in ${{ matrix.configs }}; do
+            cmake --build build --config "$config"
+            cmake --install build --config "$config" --prefix dist
+          done
 
-      - name: Create Distribution (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      # Builds a consumer that is given nothing but the package location, as a release user would
+      - name: Verify Package
         run: |
-          mkdir -p dist
-          xcopy /E /I include dist\include
-          mkdir dist\lib
-          if (Test-Path build\lib\Release\slick-socket.lib) { copy build\lib\Release\slick-socket.lib dist\lib\ }
+          prefix="$PWD/dist"
+          if command -v cygpath > /dev/null; then prefix=$(cygpath -m "$prefix"); fi
+          cmake -S tests/install_consumer -B build-consumer -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$prefix"
+          for config in ${{ matrix.configs }}; do
+            cmake --build build-consumer --config "$config"
+          done
 
-      - name: Create Distribution (Linux/macOS)
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+      - name: Create Archive
         run: |
-          mkdir -p dist
-          cp -r include dist/
-
-      - name: Create Archive (Windows)
-        if: runner.os == 'Windows'
-        run: |
+          archive="$PWD/slick-socket-${{ runner.os }}-${{ github.ref_name }}.${{ matrix.archive_ext }}"
           cd dist
-          cmake -E tar "cfv" "${{ github.workspace }}/slick-socket-Windows-${{ github.ref_name }}.zip" --format=zip .
-
-      - name: Create Archive (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cd dist
-          cmake -E tar "cfzv" "${{ github.workspace }}/slick-socket-Linux-${{ github.ref_name }}.tar.gz" .
-
-      - name: Create Archive (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd dist
-          cmake -E tar "cfzv" "${{ github.workspace }}/slick-socket-macOS-${{ github.ref_name }}.tar.gz" .
+          if [ "${{ matrix.archive_ext }}" = zip ]; then
+            cmake -E tar cfv "$archive" --format=zip .
+          else
+            cmake -E tar cfzv "$archive" .
+          fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

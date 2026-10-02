@@ -7,13 +7,15 @@
 #if !defined(_WIN32) && !defined(_WIN64)
 
 #include "tcp_server.h"
+#include "socket_options_unix.h"
 
+#include <cerrno>
+#include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <csignal>
 #include <algorithm>
 #include <cstring>
 #include <pthread.h>
@@ -32,8 +34,6 @@ template<typename DerivedT>
 inline TCPServerBase<DerivedT>::TCPServerBase(std::string name, const TCPServerConfig& config)
     : name_(std::move(name)), config_(config)
 {
-    // Ignore SIGPIPE to prevent crashes when writing to closed sockets
-    std::signal(SIGPIPE, SIG_IGN);
 }
 
 template<typename DerivedT>
@@ -415,6 +415,8 @@ void TCPServerBase<DerivedT>::accept_new_client()
         close(client_socket);
         return;
     }
+
+    detail::suppress_sigpipe(client_socket);
 
     // Make client socket non-blocking
     int flags = fcntl(client_socket, F_GETFL, 0);

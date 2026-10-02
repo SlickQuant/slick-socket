@@ -4,7 +4,10 @@
 
 #pragma once
 
+#if !defined(_WIN32) && !defined(_WIN64)
+
 #include "multicast_sender.h"
+#include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -213,3 +216,5 @@ inline bool MulticastSender::setup_multicast_options()
 }
 
 } // namespace slick::socket
+
+#endif // !defined(_WIN32) && !defined(_WIN64)

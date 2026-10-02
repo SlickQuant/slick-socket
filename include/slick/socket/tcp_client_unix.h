@@ -7,12 +7,14 @@
 #if !defined(_WIN32) && !defined(_WIN64)
 
 #include "tcp_client.h"
+#include "socket_options_unix.h"
+#include <cerrno>
+#include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <csignal>
 #include <cstring>
 #include <pthread.h>
 #include <poll.h>
@@ -24,8 +26,6 @@ template<typename DerivedT>
 inline TCPClientBase<DerivedT>::TCPClientBase(std::string name, const TCPClientConfig& config)
     : name_(std::move(name)),config_(config)
 {
-    // Ignore SIGPIPE to prevent crashes when writing to closed sockets
-    std::signal(SIGPIPE, SIG_IGN);
 }
 
 template<typename DerivedT>
@@ -63,6 +63,7 @@ inline bool TCPClientBase<DerivedT>::connect()
         LOG_ERROR("Failed to create socket: {}", std::strerror(errno));
         return false;
     }
+    detail::suppress_sigpipe(socket_);
 
     // Make socket non-blocking
     int flags = fcntl(socket_, F_GETFL, 0);

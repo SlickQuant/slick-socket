@@ -4,8 +4,11 @@
 
 #pragma once
 
+#if defined(_WIN32) || defined(_WIN64)
+
 #include "logger.h"
 #include "multicast_sender.h"
+#include <utility>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -213,3 +216,5 @@ inline bool MulticastSender::setup_multicast_options()
 }
 
 } // namespace slick::socket
+
+#endif // defined(_WIN32) || defined(_WIN64)

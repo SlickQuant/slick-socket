@@ -7,6 +7,8 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "tcp_client.h"
+#include <stdexcept>
+#include <utility>
 #include <ws2tcpip.h>
 #include <windows.h>
 

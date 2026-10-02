@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <cstdlib>
+#include <exception>
 #include <slick/socket/logger.h>
 #include <atomic>
 #include <cassert>

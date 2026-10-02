@@ -58,8 +58,9 @@ if(WIN32)
       $<INSTALL_INTERFACE:include>
     )
 
-    # Set export properties
-    set_target_properties(wepoll_lib PROPERTIES EXPORT_NAME wepoll)
+    # Set export properties. The debug postfix lets Debug and Release builds install side by side,
+    # so one install tree serves consumers of both configurations without mixing C runtimes.
+    set_target_properties(wepoll_lib PROPERTIES EXPORT_NAME wepoll DEBUG_POSTFIX d)
 
     # Create the wepoll::wepoll target
     add_library(wepoll::wepoll ALIAS wepoll_lib)
@@ -82,17 +83,6 @@ if(MSVC)
   endif()
 endif()
 
-if (NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release)
-endif()
-
-if (CMAKE_BUILD_TYPE MATCHES Debug)
-  add_definitions(-DDEBUG)
-endif()
-
-if (CMAKE_BUILD_TYPE MATCHES Release)
-  add_definitions(-DNDEBUG)
-endif()
 
 if(ENABLE_ASAN)
   if(MSVC)
@@ -129,6 +119,9 @@ target_include_directories(slick-socket INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+
+# Propagates to every consumer, including installed-package ones; CMAKE_CXX_STANDARD above only covers this project
+target_compile_features(slick-socket INTERFACE cxx_std_20)
 
 # Platform-specific dependencies
 if(WIN32)
