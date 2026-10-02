@@ -61,7 +61,7 @@ inline bool TCPServerBase<DerivedT>::start()
         return false;
     }
 
-    LOG_INFO("Starting {}, lisening on: {}...", name_, config_.port);
+    LOG_INFO("Starting {}, listening on: {}...", name_, config_.port);
     // Create server socket
     server_socket_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket_ < 0)

@@ -52,6 +52,9 @@ public:
     void onClientConnected(int client_id, const std::string&) {
         connected_clients++;
         last_connected_client_id = client_id;
+        if (greet_on_connect) {
+            send_data(client_id, std::string("hello"));
+        }
         if (kick_on_connect) {
             kick(client_id);
         }
@@ -152,6 +155,7 @@ public:
     std::atomic<size_t> bytes_received{0};
     std::atomic<bool> stop_on_data{false};
     std::atomic<bool> kick_on_connect{false};
+    std::atomic<bool> greet_on_connect{false};
     std::atomic<bool> notified_during_kick{false};
     std::atomic<int> push_target{-1};
     std::atomic<bool> late_send_failed{false};
@@ -170,11 +174,25 @@ public:
     using slick::socket::TCPClientBase<IntegrationTestClient>::TCPClientBase;
 
     void onConnected() {
+        if (slow_on_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // post-connect setup
+        }
+        if (disconnect_in_on_connected.exchange(false)) {
+            disconnect();
+        }
+        if (reconnect_in_on_connected.exchange(false)) {
+            disconnect();
+            connect();
+        }
         connected_count++;
         connection_established = true;
+        on_connected_returned = true;
     }
 
     void onDisconnected() {
+        if (connect_in_on_disconnected) {
+            callback_connect_result = connect() ? 1 : 0;  // runs on the client thread
+        }
         disconnected_count++;
         connection_established = false;
         if (external_disconnects) {
@@ -183,6 +201,9 @@ public:
     }
 
     void onData(const uint8_t* data, size_t length) {
+        if (!on_connected_returned) {
+            data_before_on_connected = true;
+        }
         if (length == 3 && std::memcmp(data, "bye", 3) == 0) {
             // The server closed the connection right after sending this
             late_send_failed = write_until_send_fails([this]() { return send_data(std::string("late")); });
@@ -216,14 +237,21 @@ public:
     std::atomic<int>* external_disconnects = nullptr;  // outlives the client, unlike the members above
     std::atomic<bool> hold{false};
     std::atomic<bool> late_send_failed{false};
+    std::atomic<bool> connect_in_on_disconnected{false};
+    std::atomic<int> callback_connect_result{-1};
+    std::atomic<bool> slow_on_connected{false};
+    std::atomic<bool> on_connected_returned{false};
+    std::atomic<bool> data_before_on_connected{false};
+    std::atomic<bool> disconnect_in_on_connected{false};
+    std::atomic<bool> reconnect_in_on_connected{false};
 
 private:
     std::mutex data_mutex_;
     std::string received_data_;
 };
 
-// CPU time consumed by a thread so far
-static std::chrono::nanoseconds thread_cpu_time(std::thread& thread)
+// CPU time consumed by a thread so far; not measured on macOS (returns -1, leaving `thread` unused)
+static std::chrono::nanoseconds thread_cpu_time([[maybe_unused]] std::thread& thread)
 {
 #if defined(_WIN32) || defined(_WIN64)
     FILETIME creation, exit, kernel, user;
@@ -731,6 +759,116 @@ TEST_F(TCPSigpipeTest, ClientWriteToClosedPeerDoesNotRaiseSigpipe) {
     ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
     EXPECT_TRUE(client_->late_send_failed.load());
     EXPECT_FALSE(client_->is_connected());
+}
+
+// send_data() on other threads must never use a socket that disconnect() is closing, or that a
+// reconnect has replaced. Also run under ThreadSanitizer to catch unsynchronized access to the handle.
+TEST_F(TCPIntegrationTest, SendConcurrentWithDisconnect) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->echo = false;
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    std::atomic<bool> done{false};
+    std::atomic<int> sends_ok{0};
+    std::vector<std::thread> senders;
+    for (int i = 0; i < 4; ++i) {
+        senders.emplace_back([&]() {
+            while (!done) {
+                if (client_->send_data(std::string("payload"))) {
+                    sends_ok++;
+                } else {
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));  // between connections
+                }
+            }
+        });
+    }
+
+    constexpr int reconnects = 20;
+    int reconnected = 0;
+    for (int i = 0; i < reconnects; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        client_->disconnect();
+        if (!client_->connect()) {
+            break;
+        }
+        reconnected++;
+    }
+    done = true;
+    for (auto& t : senders) {
+        t.join();
+    }
+
+    EXPECT_EQ(reconnected, reconnects);
+    EXPECT_GT(sends_ok.load(), 0);
+    EXPECT_TRUE(client_->is_connected());
+    EXPECT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == reconnects + 1; }));
+}
+
+// connect() cannot run on the client thread (it would have to join itself), so it fails from
+// onDisconnected(); reconnecting from another thread afterwards works
+TEST_F(TCPIntegrationTest, ReconnectMustHappenOutsideClientCallbacks) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("IntegrationClient");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    client_->connect_in_on_disconnected = true;
+    ASSERT_TRUE(client_->send_data(std::string("kick")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->disconnected_count.load() == 1; }));
+    EXPECT_EQ(client_->callback_connect_result.load(), 0);
+    EXPECT_FALSE(client_->is_connected());
+
+    client_->connect_in_on_disconnected = false;
+    ASSERT_TRUE(client_->connect());
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
+}
+
+// onConnected() completes before any onData(): the caller's post-connect setup must not race data from
+// a server that sends the moment the connection is accepted
+TEST_F(TCPIntegrationTest, OnConnectedCompletesBeforeOnData) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    server_->greet_on_connect = true;
+
+    client_ = std::make_unique<IntegrationTestClient>("IntegrationClient", client_config_);
+    client_->slow_on_connected = true;
+    ASSERT_TRUE(client_->connect());
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "hello"; }));
+    EXPECT_FALSE(client_->data_before_on_connected.load());
+}
+
+// disconnect() from onConnected() ends the connection before the client thread exists, so it reports
+// onDisconnected() itself, and connect() returns false
+TEST_F(TCPIntegrationTest, DisconnectFromOnConnected) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = std::make_unique<IntegrationTestClient>("IntegrationClient", client_config_);
+    client_->disconnect_in_on_connected = true;
+
+    EXPECT_FALSE(client_->connect());
+    EXPECT_FALSE(client_->is_connected());
+    EXPECT_EQ(client_->connected_count.load(), 1);
+    EXPECT_EQ(client_->disconnected_count.load(), 1);
+    ASSERT_TRUE(waitForCondition([this]() { return server_->disconnected_clients.load() == 1; }));
+
+    // The client is reusable afterwards
+    ASSERT_TRUE(client_->connect());
+    ASSERT_TRUE(client_->send_data(std::string("again")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "again"; }));
+}
+
+// disconnect() then connect() from onConnected(): the nested connect() starts the client thread and the
+// outer one must not start a second; each connection is reported once
+TEST_F(TCPIntegrationTest, ReconnectFromOnConnected) {
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = std::make_unique<IntegrationTestClient>("IntegrationClient", client_config_);
+    client_->reconnect_in_on_connected = true;
+
+    EXPECT_TRUE(client_->connect());
+    EXPECT_TRUE(client_->is_connected());
+    EXPECT_EQ(client_->connected_count.load(), 2);
+    EXPECT_EQ(client_->disconnected_count.load(), 1);
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
+    ASSERT_TRUE(client_->send_data(std::string("still works")));
+    ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "still works"; }));
 }
 
 // Destroying a connected client must not call onDisconnected() on the already-destroyed derived object

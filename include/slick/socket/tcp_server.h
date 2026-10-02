@@ -55,6 +55,10 @@ public:
     TCPServerBase& operator=(TCPServerBase&&) = delete;
 
     // Server control
+    // start()/stop() must not run concurrently with each other; call them from one thread at a time.
+    // They replace the socket and worker thread and are not synchronized against each other. The one
+    // supported overlap is stop() from this object's own callback while another thread calls stop():
+    // on the worker thread, stop() only flags the shutdown.
     bool start();
     void stop();
 

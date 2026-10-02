@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <slick/socket/logger.h>
 #include <slick/socket/worker_thread.h>
+#include <slick/socket/send_gate.h>
 #include <vector>
 #include <thread>
 #include <string>
@@ -65,6 +66,14 @@ public:
     TCPClientBase(TCPClientBase&&) = delete;
     TCPClientBase& operator=(TCPClientBase&&) = delete;
 
+    // connect()/disconnect() must not run concurrently with each other; call them from one thread at a
+    // time. They replace the socket and client thread and are not synchronized against each other. The
+    // one supported overlap is disconnect() from a callback while another thread calls disconnect(): on
+    // the client thread, disconnect() only flags the shutdown. send_data() may run on any thread,
+    // concurrently with both.
+    // From the client's callbacks (the client thread), disconnect() is allowed but connect() always fails:
+    // it must first join the previous connection's client thread, which cannot join itself. To reconnect
+    // from onDisconnected(), signal another thread to call connect().
     bool connect();
     void disconnect();
     
@@ -73,6 +82,11 @@ public:
         return connected_.load(std::memory_order_relaxed);
     }
 
+    // Safe to call from any number of threads, including concurrently with disconnect(): the socket is
+    // never closed while a send is using it. Blocks until the data is sent or the connection is lost.
+    // Concurrent calls each send their own data in order, but a large message can be split into partial
+    // writes, so callers that rely on message boundaries must not send concurrently.
+    // A broken connection makes it return false and ends the connection, as a server-side close does.
     bool send_data(const std::vector<uint8_t>& data);
     bool send_data(const std::string& data)
     {
@@ -93,6 +107,12 @@ protected:
     const DerivedT& derived() const { return static_cast<const DerivedT&>(*this); }
 
     void client_loop();
+
+    // Final step of a successful connect(), shared by both platforms: reports the connection, then
+    // starts the client thread. onConnected() runs first, on the calling thread, so the caller's
+    // post-connect setup completes before any onData()/onDisconnected(); data the server sends
+    // meanwhile waits in the socket. Returns connect()'s result.
+    bool finish_connect();
     void handle_server_data(std::vector<uint8_t>& buffer);
 
     // Joins the client thread (unless called from it) and closes the socket.
@@ -138,7 +158,58 @@ protected:
     std::thread client_thread_;
     detail::WorkerThreadId client_thread_id_;
     SocketT socket_ = invalid_socket;
+    detail::SendGate send_gate_;  // keeps socket_ open while send_data() uses it from other threads
 };
+
+template<typename DerivedT>
+inline bool TCPClientBase<DerivedT>::finish_connect()
+{
+    send_gate_.open();
+    connected_.store(true, std::memory_order_release);
+    derived().onConnected();
+
+    // onConnected() may have changed the connection before the client thread exists
+    if (client_thread_.joinable())
+    {
+        // It reconnected (disconnect() then connect()); that connect() started the client thread
+        return connected_.load(std::memory_order_relaxed);
+    }
+    if (socket_ == invalid_socket)
+    {
+        // It called disconnect(), which closed the socket and reported onDisconnected()
+        return false;
+    }
+
+    // Started even if a send in onConnected() already found the connection broken: the loop then
+    // sees connected_ cleared, reports onDisconnected() and exits, as for any lost connection
+    client_thread_ = std::thread(&TCPClientBase::client_loop, this);
+    return connected_.load(std::memory_order_relaxed);
+}
+
+template<typename DerivedT>
+inline void TCPClientBase<DerivedT>::disconnect()
+{
+    // The client thread may already have cleared connected_ (server closed the connection),
+    // so the thread and socket are released regardless of the previous state.
+    const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
+    if (was_connected)
+    {
+        LOG_INFO("Disconnecting from {}:{}...", config_.server_address, config_.server_port);
+    }
+
+    // Connected without a client thread only happens inside onConnected(), before connect() starts the
+    // thread. No thread will report this disconnect then, so it is reported here.
+    const bool report_here = was_connected && !client_thread_.joinable();
+
+    if (release_connection() && was_connected)
+    {
+        LOG_INFO("Disconnected");
+        if (report_here && !destroying_.load(std::memory_order_relaxed))
+        {
+            derived().onDisconnected();
+        }
+    }
+}
 
 } // namespace slick::socket
 

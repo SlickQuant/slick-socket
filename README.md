@@ -255,11 +255,15 @@ int main()
 }
 ```
 
-If the server closes the connection, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object.
+`onConnected()` runs on the thread that calls `connect()`, before the client thread starts, so `onData()` and `onDisconnected()` never run until it has returned; data the server sends meanwhile waits in the socket. Calling `disconnect()` from `onConnected()` reports `onDisconnected()` right away and makes `connect()` return `false`.
+
+If the server closes the connection, or a `send_data()` finds it broken, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object, but not from the client's own callbacks: there `connect()` returns `false`, because it must first join the finished client thread, which is the calling thread. To reconnect after `onDisconnected()`, have the callback signal another thread to call `connect()`.
 
 The client thread blocks in `poll()` while idle; setting `TCPClientConfig::cpu_affinity` pins it to a core and switches to busy-polling `recv()` for the lowest latency. `send_data()` blocks the calling thread (without spinning) until the server has accepted all of the data.
 
-> **Lifetime:** servers, clients and multicast receivers must be stopped (`stop()` / `disconnect()`, called from outside their worker thread) before the derived object is destroyed, e.g. in the derived destructor. This also applies after the server closed a client's connection or after `stop()` was called from a callback: the outside call joins the finished worker thread. The base destructor runs after the derived members are gone, so a callback still running at that point would touch destroyed state. Destroying a running object is reported: an error is logged and `SLICK_SOCKET_ON_UNSAFE_DESTROY()` is invoked, which asserts in debug builds. Define that macro before including any slick-socket header to handle it differently (e.g. count or abort). It runs inside a destructor, so it must not throw: an escaping exception calls `std::terminate()`. As a last-resort safety net, a client destroyed while connected skips `onDisconnected()`.
+`send_data()` may be called from any number of threads, including while another thread calls `disconnect()`: the socket is not closed until every send in progress has finished, so a send never uses a closed or reused socket. Sends take no lock; each costs two atomic operations. Concurrent `send_data()` calls can interleave their bytes when a large message is written in parts, so serialize them if message boundaries matter. `connect()` and `disconnect()` must not run concurrently with each other. A thread that stops or disconnects is never held up by other threads that keep calling `send_data()`: a rejected send does not count as in progress.
+
+> **Lifetime:** servers, clients and multicast receivers must be stopped (`stop()` / `disconnect()`, called from outside their worker thread) before the derived object is destroyed, e.g. in the derived destructor. This also applies after the server closed a client's connection, after a client's `send_data()` found the connection broken, or after `stop()` was called from a callback: the outside call joins the finished worker thread. The base destructor runs after the derived members are gone, so a callback still running at that point would touch destroyed state. Destroying a running object is reported: an error is logged and `SLICK_SOCKET_ON_UNSAFE_DESTROY()` is invoked, which asserts in debug builds. Define that macro before including any slick-socket header to handle it differently (e.g. count or abort). It runs inside a destructor, so it must not throw: an escaping exception calls `std::terminate()`. As a last-resort safety net, a client destroyed while connected skips `onDisconnected()`.
 
 ### Creating a Multicast Sender
 
@@ -291,6 +295,8 @@ int main()
     return 0;
 }
 ```
+
+`send_data()` may be called from any number of threads, including while another thread calls `stop()`: the socket is not closed until every send in progress has finished. Sends take no lock and each call sends one datagram. If the send buffer is full, `send_data()` waits for room, but returns `false` within about 1 ms once `stop()` is called, so a stalled network cannot hold up `stop()`.
 
 ### Creating a Multicast Receiver
 
@@ -334,6 +340,15 @@ int main()
 ```
 
 `stop()` may be called from `handle_multicast_data()`; the receiver thread leaves the group and closes its socket once the callback returns.
+
+### Threading
+
+| Calls | Thread rule |
+| --- | --- |
+| Control: `start()`/`stop()` (server, multicast sender and receiver), `connect()`/`disconnect()` (client) | One thread at a time per object. These replace the socket and worker thread and are not synchronized against each other, so overlapping them (e.g. `stop()` on one thread while `start()` runs on another) is undefined. The one supported overlap is `stop()`/`disconnect()` from the object's own callback while another thread calls `stop()`/`disconnect()`: on the worker thread it only flags the shutdown. |
+| `send_data()` on `TCPClientBase` and `MulticastSender` | Any thread, concurrently with each other and with the control calls. |
+| `send_data()`/`disconnect_client()` on `TCPServerBase` | The server thread only, i.e. from a server callback. |
+| `is_running()`, `is_connected()`, `get_connected_client_count()`, statistics getters | Any thread. |
 
 For more examples, see the [examples/](examples/) directory.
 

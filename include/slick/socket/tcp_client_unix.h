@@ -130,23 +130,7 @@ inline bool TCPClientBase<DerivedT>::connect()
         return false;
     }
 
-    connected_.store(true, std::memory_order_release);
-    client_thread_ = std::thread(&TCPClientBase::client_loop, this);
-    derived().onConnected();
-    return true;
-}
-
-template<typename DerivedT>
-inline void TCPClientBase<DerivedT>::disconnect()
-{
-    // The client thread may already have cleared connected_ (server closed the connection),
-    // so the thread and socket are released regardless of the previous state.
-    const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
-
-    if (release_connection() && was_connected)
-    {
-        LOG_INFO("TCP client disconnected");
-    }
+    return finish_connect();
 }
 
 template<typename DerivedT>
@@ -159,6 +143,9 @@ inline bool TCPClientBase<DerivedT>::release_connection()
     }
 
     // Only close after the client thread is gone so it never reads a closed/reused descriptor
+    // ...and after every send_data() on another thread has left it. Senders blocked on a full socket
+    // re-check connected_ every poll_interval_ms, which is already false here, so this wait is short.
+    send_gate_.close();
     if (socket_ != invalid_socket)
     {
         close(socket_);
@@ -179,7 +166,7 @@ inline void TCPClientBase<DerivedT>::client_loop()
 {
     detail::WorkerThreadId::Scope worker_scope(client_thread_id_);
 
-    LOG_INFO("Client loop started");
+    LOG_DEBUG("Client loop started");
 
     // Set CPU affinity if specified
 #ifndef __APPLE__
@@ -257,7 +244,7 @@ inline void TCPClientBase<DerivedT>::client_loop()
     }
 
     // The socket is closed by release_connection() once this thread has been joined
-    LOG_INFO("Client loop ended");
+    LOG_DEBUG("Client loop ended");
 }
 
 template<typename DerivedT>
@@ -270,7 +257,9 @@ inline void TCPClientBase<DerivedT>::handle_server_data(std::vector<uint8_t>& bu
 template<typename DerivedT>
 inline bool TCPClientBase<DerivedT>::send_data(const std::vector<uint8_t>& data)
 {
-    if (!connected_.load(std::memory_order_relaxed) || socket_ == invalid_socket)
+    // Holds the socket open for the duration of the send, even if another thread disconnects
+    detail::SendGate::Pass pass(send_gate_);
+    if (!pass || !connected_.load(std::memory_order_relaxed))
     {
         LOG_WARN("Cannot send data: client not connected");
         return false;
@@ -310,8 +299,11 @@ inline bool TCPClientBase<DerivedT>::send_data(const std::vector<uint8_t>& data)
             // Check if connection is broken
             if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN)
             {
-                LOG_INFO("Connection lost during send, disconnecting");
-                disconnect();
+                // Ends the connection the way a server-side close does: the client thread reports
+                // onDisconnected() and exits, and the next disconnect()/connect() releases the socket.
+                // Joining or closing here instead would race a disconnect() on another thread.
+                LOG_INFO("Connection lost during send");
+                connected_.store(false, std::memory_order_release);
             }
             return false;
         }

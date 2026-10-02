@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
+#include <fcntl.h>
+#include <poll.h>
 
 namespace slick::socket
 {
@@ -53,21 +55,23 @@ inline bool MulticastSender::start()
         return false;
     }
 
-    running_.store(true, std::memory_order_relaxed);
+    send_gate_.open();
+    running_.store(true, std::memory_order_release);
     LOG_INFO("{} started successfully", name_);
     return true;
 }
 
 inline void MulticastSender::stop()
 {
-    if (!running_.load(std::memory_order_relaxed))
+    if (!running_.exchange(false, std::memory_order_acq_rel))
     {
         return;
     }
 
     LOG_INFO("Stopping {}...", name_);
-    running_.store(false, std::memory_order_relaxed);
 
+    // Waits for send_data() calls on other threads to leave the socket before closing it
+    send_gate_.close();
     cleanup_socket();
 
     LOG_INFO("{} stopped", name_);
@@ -75,7 +79,9 @@ inline void MulticastSender::stop()
 
 inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
 {
-    if (!running_.load(std::memory_order_relaxed))
+    // Holds the socket open for the duration of the send, even if another thread stops the sender
+    detail::SendGate::Pass pass(send_gate_);
+    if (!pass)
     {
         LOG_WARN("Cannot send data: {} is not running", name_);
         return false;
@@ -100,13 +106,20 @@ inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
         return false;
     }
 
-    // Send the data
-    ssize_t bytes_sent = sendto(socket_, 
-                               data.data(), 
-                               data.size(),
-                               0,
-                               reinterpret_cast<const sockaddr*>(&dest_addr),
-                               sizeof(dest_addr));
+    // The socket is non-blocking: a full send buffer is waited out in short slices, so a stop() on
+    // another thread is noticed instead of this call staying blocked in sendto()
+    ssize_t bytes_sent;
+    while ((bytes_sent = sendto(socket_, data.data(), data.size(), 0,
+                                reinterpret_cast<const sockaddr*>(&dest_addr), sizeof(dest_addr))) < 0 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+    {
+        if (!running_.load(std::memory_order_relaxed))
+        {
+            LOG_WARN("Cannot send data: {} stopped while waiting for send buffer space", name_);
+            return false;
+        }
+        wait_writable();
+    }
 
     if (bytes_sent < 0)
     {
@@ -147,7 +160,23 @@ inline bool MulticastSender::initialize_socket()
         LOG_WARN("Failed to set send buffer size. error={} ({})", error, strerror(error));
     }
 
+    // Non-blocking, so send_data() can give up when stop() is called instead of blocking in sendto()
+    int flags = fcntl(socket_, F_GETFL, 0);
+    if (flags < 0 || fcntl(socket_, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+        int error = errno;
+        LOG_ERROR("Failed to make socket non-blocking. error={} ({})", error, strerror(error));
+        cleanup_socket();
+        return false;
+    }
+
     return true;
+}
+
+inline void MulticastSender::wait_writable() const
+{
+    pollfd pfd{socket_, POLLOUT, 0};
+    ::poll(&pfd, 1, poll_interval_ms);
 }
 
 inline void MulticastSender::cleanup_socket()

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "logger.h"
+#include "send_gate.h"
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -42,6 +43,9 @@ public:
     MulticastSender& operator=(MulticastSender&&) = delete;
 
     // Sender control
+    // start()/stop() must not run concurrently with each other; call them from one thread at a time.
+    // They replace the socket and are not synchronized against each other. send_data() may run on any
+    // thread, concurrently with both.
     bool start();
     void stop();
 
@@ -50,7 +54,9 @@ public:
         return running_.load(std::memory_order_relaxed);
     }
 
-    // Send data
+    // Safe to call from any number of threads, including concurrently with stop(): the socket is never
+    // closed while a send is using it. Each call sends one datagram. If the send buffer is full, it
+    // waits for room, but gives up (returns false) within poll_interval_ms once stop() is called.
     bool send_data(const std::vector<uint8_t>& data);
     bool send_data(const std::string& data)
     {
@@ -89,6 +95,7 @@ protected:
     std::atomic_bool running_{false};
 
     SocketT socket_ = invalid_socket;
+    detail::SendGate send_gate_;  // keeps socket_ open while send_data() uses it from other threads
     
     // Statistics
     std::atomic<uint64_t> packets_sent_{0};
@@ -99,6 +106,12 @@ private:
     bool initialize_socket();
     void cleanup_socket();
     bool setup_multicast_options();
+
+    // Waits up to poll_interval_ms for room in the socket's send buffer
+    void wait_writable() const;
+
+    // How long a send blocked on a full buffer waits before re-checking running_
+    static constexpr int poll_interval_ms = 1;
 };
 
 } // namespace slick::socket

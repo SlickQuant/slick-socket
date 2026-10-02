@@ -4,6 +4,11 @@
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <atomic>
+#include <vector>
+#if !defined(_WIN32) && !defined(_WIN64)
+#include <fcntl.h>
+#endif
 
 // The sender owns its socket, so moving one would leave two owners of the same OS resource
 static_assert(!std::is_move_constructible_v<slick::socket::MulticastSender>);
@@ -231,4 +236,65 @@ TEST_F(MulticastSenderTest, InvalidMulticastAddress) {
     EXPECT_GT(sender_->get_send_errors(), 0u);
     
     sender_->stop();
+}
+
+// send_data() on other threads must never use a socket that stop() is closing. Sending on the closed
+// handle fails (e.g. EBADF) and counts as a send error. Also run under ThreadSanitizer.
+TEST_F(MulticastSenderTest, SendConcurrentWithStop) {
+    sender_ = std::make_unique<slick::socket::MulticastSender>("TestMulticastSender", config_);
+    ASSERT_TRUE(sender_->start());
+
+    std::atomic<bool> done{false};
+    std::vector<std::thread> senders;
+    for (int i = 0; i < 4; ++i) {
+        senders.emplace_back([&]() {
+            const std::vector<uint8_t> payload(64, 0x5a);
+            while (!done) {
+                sender_->send_data(payload);  // no pause when rejected: keeps attempts overlapping stop()
+            }
+        });
+    }
+
+    constexpr int restarts = 50;
+    int restarted = 0;
+    for (int i = 0; i < restarts; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        sender_->stop();
+        if (!sender_->start()) {
+            break;
+        }
+        restarted++;
+    }
+    done = true;
+    for (auto& t : senders) {
+        t.join();
+    }
+
+    EXPECT_EQ(restarted, restarts);
+    if (!running_in_ci()) {
+        EXPECT_GT(sender_->get_packets_sent(), 0u);
+        EXPECT_EQ(sender_->get_send_errors(), 0u);
+    }
+}
+
+// Exposes the socket so tests can inspect how it is configured
+class InspectableMulticastSender : public slick::socket::MulticastSender {
+public:
+    using slick::socket::MulticastSender::MulticastSender;
+    SocketT socket() const { return socket_; }
+};
+
+// A blocking sendto() on a full send buffer cannot notice stop(), which would then wait for it
+// indefinitely; the socket must be non-blocking so send_data() can give up once stopped
+TEST_F(MulticastSenderTest, SocketIsNonBlocking) {
+#if defined(_WIN32) || defined(_WIN64)
+    GTEST_SKIP() << "Windows cannot query a socket's blocking mode";
+#else
+    InspectableMulticastSender sender("TestMulticastSender", config_);
+    ASSERT_TRUE(sender.start());
+    const int flags = fcntl(sender.socket(), F_GETFL, 0);
+    ASSERT_GE(flags, 0);
+    EXPECT_NE(flags & O_NONBLOCK, 0);
+    sender.stop();
+#endif
 }
