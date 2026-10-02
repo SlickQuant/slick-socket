@@ -3,10 +3,16 @@
 #include <slick/socket/multicast_sender.h>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
 
 // The sender owns its socket, so moving one would leave two owners of the same OS resource
 static_assert(!std::is_move_constructible_v<slick::socket::MulticastSender>);
 static_assert(!std::is_move_assignable_v<slick::socket::MulticastSender>);
+
+// Restricted environments (like GitHub CI) may block multicast sending
+static bool running_in_ci() {
+    return std::getenv("CI") != nullptr || std::getenv("GITHUB_ACTIONS") != nullptr;
+}
 
 class MulticastSenderTest : public ::testing::Test {
 protected:
@@ -79,7 +85,7 @@ TEST_F(MulticastSenderTest, SendDataWhenRunning) {
 
     // Check if we're in a restricted environment (like GitHub CI)
     // where multicast sending might be blocked
-    bool is_ci = std::getenv("CI") != nullptr || std::getenv("GITHUB_ACTIONS") != nullptr;
+    const bool is_ci = running_in_ci();
 
     if (is_ci && !result) {
         // In CI, multicast may be restricted - skip assertions
@@ -158,7 +164,7 @@ TEST_F(MulticastSenderTest, MultipleDataSends) {
     const std::string base_message = "Message ";
 
     // Check if we're in a restricted environment
-    bool is_ci = std::getenv("CI") != nullptr || std::getenv("GITHUB_ACTIONS") != nullptr;
+    const bool is_ci = running_in_ci();
     int successful_sends = 0;
 
     // Send multiple messages

@@ -10,9 +10,22 @@ project(slick-socket
 )
 
 # Options
-option(BUILD_SLICK_SOCKET_EXAMPLES "Build tests" ON)
+option(BUILD_SLICK_SOCKET_EXAMPLES "Build examples" ON)
 option(BUILD_SLICK_SOCKET_TESTING "Build tests" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+# Defaults to ON only when this is the top-level project, so a newer compiler's warnings cannot break
+# a consumer that builds these tests/examples through add_subdirectory/FetchContent
+option(SLICK_SOCKET_WARNINGS_AS_ERRORS "Treat warnings as errors in tests and examples" ${PROJECT_IS_TOP_LEVEL})
+
+# Strict warnings for this project's own targets. The headers are compiled by consumers at any warning
+# level, so the tests/examples build them at a high one. Never applied to the slick::socket interface target.
+function(slick_socket_enable_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive- $<$<BOOL:${SLICK_SOCKET_WARNINGS_AS_ERRORS}>:/WX>)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${SLICK_SOCKET_WARNINGS_AS_ERRORS}>:-Werror>)
+  endif()
+endfunction()
 
 if(WIN32)
   # Find wepoll (vcpkg installation without CMake config)

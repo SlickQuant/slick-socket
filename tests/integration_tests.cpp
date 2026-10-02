@@ -31,7 +31,7 @@ public:
     using slick::socket::TCPServerBase<IntegrationTestServer>::get_connected_client_count;
     using slick::socket::TCPServerBase<IntegrationTestServer>::send_data;
 
-    void onClientConnected(int client_id, const std::string& client_address) {
+    void onClientConnected(int client_id, const std::string&) {
         connected_clients++;
         last_connected_client_id = client_id;
         if (kick_on_connect) {

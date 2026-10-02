@@ -34,9 +34,12 @@ target_link_libraries(tests
 
 target_include_directories(tests
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+slick_socket_enable_warnings(tests)
+# std::getenv is only read, so MSVC's _dupenv_s suggestion does not apply
+target_compile_definitions(tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
 
 # Discover tests with increased timeout
 gtest_discover_tests(tests

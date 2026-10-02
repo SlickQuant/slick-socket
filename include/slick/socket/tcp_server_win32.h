@@ -18,8 +18,8 @@
 namespace slick::socket
 {
 
-template<typename DrivedT>
-inline TCPServerBase<DrivedT>::TCPServerBase(std::string name, const TCPServerConfig& config)
+template<typename DerivedT>
+inline TCPServerBase<DerivedT>::TCPServerBase(std::string name, const TCPServerConfig& config)
     : name_(std::move(name)), config_(config)
 {
     WSADATA wsa_data;
@@ -30,8 +30,8 @@ inline TCPServerBase<DrivedT>::TCPServerBase(std::string name, const TCPServerCo
     }
 }
 
-template<typename DrivedT>
-inline TCPServerBase<DrivedT>::~TCPServerBase()
+template<typename DerivedT>
+inline TCPServerBase<DerivedT>::~TCPServerBase()
 {
     if (!detail::stopped_before_destroy(server_thread_, name_))
     {
@@ -41,8 +41,8 @@ inline TCPServerBase<DrivedT>::~TCPServerBase()
     WSACleanup();
 }
 
-template<typename DrivedT>
-inline bool TCPServerBase<DrivedT>::start()
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::start()
 {
     if (running_.load(std::memory_order_relaxed))
     {
@@ -120,14 +120,14 @@ inline bool TCPServerBase<DrivedT>::start()
     running_.store(true, std::memory_order_release);
 
     // Start single-threaded server loop
-    server_thread_ = std::thread(&TCPServerBase<DrivedT>::server_loop, this);
+    server_thread_ = std::thread(&TCPServerBase<DerivedT>::server_loop, this);
 
     LOG_INFO("{} started", name_);
     return true;
 }
 
-template<typename DrivedT>
-inline void TCPServerBase<DrivedT>::release_resources()
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::release_resources()
 {
     if (server_socket_ != INVALID_SOCKET)
     {
@@ -151,8 +151,8 @@ inline void TCPServerBase<DrivedT>::release_resources()
     }
 }
 
-template<typename DrivedT>
-inline auto TCPServerBase<DrivedT>::write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent) -> SendStatus
+template<typename DerivedT>
+inline auto TCPServerBase<DerivedT>::write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent) -> SendStatus
 {
     while (sent < size)
     {
@@ -177,17 +177,17 @@ inline auto TCPServerBase<DrivedT>::write_some(SocketT socket, const uint8_t* da
     return SendStatus::complete;
 }
 
-template<typename DrivedT>
-inline bool TCPServerBase<DrivedT>::set_write_interest(SocketT socket, bool enable)
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::set_write_interest(SocketT socket, bool enable)
 {
     struct epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLRDHUP | (enable ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | EPOLLRDHUP | (enable ? static_cast<uint32_t>(EPOLLOUT) : 0u);
     ev.data.sock = socket;
     return epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, socket, &ev) == 0;
 }
 
-template<typename DrivedT>
-inline bool TCPServerBase<DrivedT>::create_event_loop()
+template<typename DerivedT>
+inline bool TCPServerBase<DerivedT>::create_event_loop()
 {
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ == nullptr)
@@ -209,16 +209,16 @@ inline bool TCPServerBase<DrivedT>::create_event_loop()
     return true;
 }
 
-template<typename DrivedT>
-inline void TCPServerBase<DrivedT>::close_socket(SocketT socket)
+template<typename DerivedT>
+inline void TCPServerBase<DerivedT>::close_socket(SocketT socket)
 {
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, socket, nullptr);
     socket_to_client_id_.erase(socket);
     closesocket(socket);
 }
 
-template<typename DrivedT>
-void TCPServerBase<DrivedT>::server_loop()
+template<typename DerivedT>
+void TCPServerBase<DerivedT>::server_loop()
 {
     detail::WorkerThreadId::Scope worker_scope(server_thread_id_);
 
@@ -292,8 +292,8 @@ void TCPServerBase<DrivedT>::server_loop()
     release_resources();
 }
 
-template<typename DrivedT>
-void TCPServerBase<DrivedT>::accept_new_client()
+template<typename DerivedT>
+void TCPServerBase<DerivedT>::accept_new_client()
 {
     sockaddr_in client_addr{};
     int addr_len = sizeof(client_addr);
@@ -344,8 +344,8 @@ void TCPServerBase<DrivedT>::accept_new_client()
     register_client(client_socket, addr_str);
 }
 
-template<typename DrivedT>
-void TCPServerBase<DrivedT>::handle_client_data(int client_id, std::vector<uint8_t>& buffer)
+template<typename DerivedT>
+void TCPServerBase<DerivedT>::handle_client_data(int client_id, std::vector<uint8_t>& buffer)
 {
     auto it = clients_.find(client_id);
     if (it == clients_.end())

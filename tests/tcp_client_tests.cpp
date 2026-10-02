@@ -63,7 +63,7 @@ TEST_F(TCPClientTest, ClientConnectionAttempt) {
     client_ = std::make_unique<TestClient>("TestClient", config_);
     
     // Try to connect (will likely fail since no server is running)
-    bool connected = client_->connect();
+    client_->connect();
     
     // Give some time for connection attempt
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

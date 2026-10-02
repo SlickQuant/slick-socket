@@ -193,7 +193,7 @@ inline bool TCPServerBase<DerivedT>::set_write_interest(SocketT socket, bool ena
     return kevent(epoll_fd_, &ev, 1, nullptr, 0, nullptr) == 0;
 #else
     struct epoll_event ev{};
-    ev.events = EPOLLIN | (enable ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | (enable ? static_cast<uint32_t>(EPOLLOUT) : 0u);
     ev.data.fd = socket;
     return epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, socket, &ev) == 0;
 #endif

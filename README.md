@@ -15,7 +15,7 @@ A header-only C++20 networking library providing cross-platform TCP and UDP mult
 - **Asynchronous**: Non-blocking socket operations with timeout handling
 - **TCP Communication**: Client and server implementations
 - **UDP Multicast**: One-to-many communication support
-- **Logging**: Template-based logger interface with console output
+- **Logging**: Pluggable via `LOG_DEBUG`/`LOG_INFO`/`LOG_WARN`/`LOG_ERROR`/`LOG_TRACE` macros defined before including the headers; no-op by default
 
 ## Dependencies
 
@@ -364,18 +364,27 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
+#### Compiler Warnings
+
+Tests and examples build with `/W4` (MSVC) or `-Wall -Wextra -Wpedantic` (GCC/Clang), so the headers stay clean for consumers at high warning levels. `SLICK_SOCKET_WARNINGS_AS_ERRORS` adds `/WX` / `-Werror`; it defaults to `ON` only when slick-socket is the top-level project, so pulling it in through `FetchContent` or `add_subdirectory` never fails on a newer compiler's warnings. The flags never apply to the `slick::socket` target itself.
+
+```bash
+cmake -S . -B build -DSLICK_SOCKET_WARNINGS_AS_ERRORS=OFF
+```
+
 ### Project Structure
 
 ```
 slick-socket/
-├── include/slick/socket/     # Public headers
+├── include/slick/socket/     # Public headers (header-only)
 │   ├── tcp_server.h          # TCP server base class
 │   ├── tcp_client.h          # TCP client base class
 │   ├── multicast_sender.h    # UDP multicast sender
 │   ├── multicast_receiver.h  # UDP multicast receiver
+│   ├── *_win32.h / *_unix.h  # Platform implementations, included by the headers above
 │   ├── worker_thread.h       # Worker-thread identity helper (internal)
 │   └── logger.h              # Logger interface
-├── src/                       # Implementation files (Windows-specific)
+├── cmake/                     # CMake package config template
 ├── examples/                  # Usage examples
 ├── tests/                     # Unit and integration tests
 └── CMakeLists.txt

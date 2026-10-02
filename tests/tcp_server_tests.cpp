@@ -10,15 +10,15 @@ public:
     using slick::socket::TCPServerBase<TestServer>::TCPServerBase;
     using slick::socket::TCPServerBase<TestServer>::get_connected_client_count; // Make public for testing
     
-    void onClientConnected(int client_id, const std::string& client_address) {
+    void onClientConnected(int, const std::string&) {
         connected_clients++;
     }
     
-    void onClientDisconnected(int client_id) {
+    void onClientDisconnected(int) {
         disconnected_clients++;
     }
     
-    void onClientData(int client_id, const uint8_t* data, size_t length) {
+    void onClientData(int, const uint8_t*, size_t) {
         data_received++;
     }
 
