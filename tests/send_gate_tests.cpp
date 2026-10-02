@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <slick/socket/send_gate.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -67,12 +68,17 @@ TEST(SendGateTest, RejectedSenderDoesNotDelayClose) {
 
 // Threads hammering the gate without pausing must neither starve close() nor be admitted while closed
 TEST(SendGateTest, CloseCompletesUnderSustainedSendAttempts) {
+    // Leaves a core for the thread cycling the gate, so small CI runners (3 cores on GitHub's macOS)
+    // measure the gate rather than CPU oversubscription
+    const unsigned hardware = std::thread::hardware_concurrency();
+    const unsigned sender_count = hardware > 1 ? (std::min)(4u, hardware - 1) : 1u;
+
     SendGate gate;
     std::atomic<bool> closed_for_sure{false};  // set only between close() returning and the next open()
     std::atomic<bool> admitted_while_closed{false};
     std::atomic<bool> done{false};
     std::vector<std::thread> senders;
-    for (int i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < sender_count; ++i) {
         senders.emplace_back([&]() {
             while (!done.load(std::memory_order_relaxed)) {
                 SendGate::Pass pass(gate);
@@ -84,12 +90,19 @@ TEST(SendGateTest, CloseCompletesUnderSustainedSendAttempts) {
     }
 
     auto cycles = std::async(std::launch::async, [&]() {
+        // Gives the senders time in each state by busy-waiting: the same duration on every OS, unlike
+        // yield() (a whole scheduling quantum on macOS) or sleep_for() (rounded up to 1-15.6 ms on Windows)
+        auto busy_wait = []() {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(20);
+            while (std::chrono::steady_clock::now() < until) {
+            }
+        };
         for (int i = 0; i < 2000; ++i) {
             gate.open();
-            std::this_thread::yield();
+            busy_wait();
             gate.close();
             closed_for_sure = true;
-            std::this_thread::yield();
+            busy_wait();
             closed_for_sure = false;
         }
     });

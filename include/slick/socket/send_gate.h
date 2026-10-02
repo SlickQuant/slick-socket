@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <thread>
 
@@ -73,15 +74,30 @@ public:
     void close() noexcept
     {
         uint32_t state = state_.fetch_or(closed_bit, std::memory_order_acquire);
+
+        // Admitted senders leave as soon as their current send returns
         while ((state & ~closed_bit) != 0)
         {
-            std::this_thread::yield();
+            backoff();
             state = state_.load(std::memory_order_acquire);
         }
     }
 
 private:
     static constexpr uint32_t closed_bit = uint32_t{1} << 31;
+
+    // Lets the sender being waited for run. yield() is a plain reschedule on Linux and Windows, but on
+    // macOS, yielding while other threads are runnable drops the caller's priority for a whole scheduling
+    // quantum (~10 ms), so there it sleeps briefly instead. Not a sleep elsewhere: Windows rounds sleeps
+    // up to its timer resolution (1-15.6 ms).
+    static void backoff() noexcept
+    {
+#if defined(__APPLE__)
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+#else
+        std::this_thread::yield();
+#endif
+    }
 
     std::atomic<uint32_t> state_{closed_bit};  // starts closed; low bits count admitted senders
 };
