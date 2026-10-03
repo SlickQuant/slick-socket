@@ -81,13 +81,17 @@ protected:
     void accept_new_client();
     void handle_client_data(int client_id, std::vector<uint8_t>& buffer);
 
-    // Send data to client. Must be called on the server thread (i.e. from a server callback).
-    // Never blocks: data the socket cannot take right away is queued and flushed when it becomes writable.
-    bool send_data(int client_id, const std::vector<uint8_t>& data);
+    // Send data to client. Must be called on the server thread (i.e. from a server callback, including
+    // onPoll()). Never blocks: data the socket cannot take right away is queued and flushed when it
+    // becomes writable. The pointer form is the primitive; it sends straight from the caller's buffer.
+    bool send_data(int client_id, const uint8_t* data, size_t size);
+    bool send_data(int client_id, const std::vector<uint8_t>& data)
+    {
+        return send_data(client_id, data.data(), data.size());
+    }
     bool send_data(int client_id, const std::string& data)
     {
-        std::vector<uint8_t> buffer(data.begin(), data.end());
-        return send_data(client_id, buffer);
+        return send_data(client_id, reinterpret_cast<const uint8_t*>(data.data()), data.size());
     }
 
     // Closes the client's connection. Must be called on the server thread (i.e. from a server callback).
@@ -194,6 +198,21 @@ protected:
         {
             reap_idle_clients();
             after_event();
+        }
+
+        // Optional hook: a derived class that declares a public `void onPoll()` gets it called once per
+        // loop iteration, on the server thread, whether or not any event arrived. It is where work that
+        // originates off the network - draining a queue another thread fills, timers - can call
+        // send_data()/disconnect_client(), which are server-thread only. Detected at compile time, so a
+        // server without it pays nothing. Iterations are paced by the event wait: back to back with
+        // cpu_affinity set, at most ~1 ms apart otherwise.
+        if constexpr (requires(DerivedT& d) { d.onPoll(); })
+        {
+            if (running_.load(std::memory_order_relaxed))
+            {
+                derived().onPoll();
+                after_event();
+            }
         }
     }
 
@@ -303,7 +322,7 @@ inline void TCPServerBase<DerivedT>::stop()
 }
 
 template<typename DerivedT>
-inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<uint8_t>& data)
+inline bool TCPServerBase<DerivedT>::send_data(int client_id, const uint8_t* data, size_t size)
 {
     auto it = clients_.find(client_id);
     if (it == clients_.end())
@@ -316,10 +335,10 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
     // Checked before the direct write: once the kernel takes part of a message, the rest must be
     // queued whatever its size, so admission can only be all-or-nothing up front
     if (config_.max_pending_send_bytes > 0 &&
-        client.pending_size() + data.size() > config_.max_pending_send_bytes)
+        client.pending_size() + size > config_.max_pending_send_bytes)
     {
         LOG_WARN("Send queue for client {} is full ({} bytes pending), dropping {} bytes",
-                 client_id, client.pending_size(), data.size());
+                 client_id, client.pending_size(), size);
         return false;
     }
 
@@ -327,7 +346,7 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
     if (!client.has_pending())
     {
         // Nothing queued, so ordering allows writing straight to the socket
-        const SendStatus status = write_some(client.socket, data.data(), data.size(), sent);
+        const SendStatus status = write_some(client.socket, data, size, sent);
         if (sent != 0)
         {
             client.last_activity = loop_now_;
@@ -347,8 +366,8 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const std::vector<
     }
 
     // The peer is not keeping up: queue the rest instead of spinning on the event thread
-    LOG_TRACE("Queued {} bytes for client {}", data.size() - sent, client_id);
-    return queue_pending(it, data.data() + sent, data.size() - sent);
+    LOG_TRACE("Queued {} bytes for client {}", size - sent, client_id);
+    return queue_pending(it, data + sent, size - sent);
 }
 
 template<typename DerivedT>

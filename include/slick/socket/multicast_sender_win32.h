@@ -61,6 +61,7 @@ inline bool MulticastSender::start()
         return false;
     }
 
+    resolve_destination();
     send_gate_.open();
     running_.store(true, std::memory_order_release);
     LOG_INFO("{} started successfully", name_);
@@ -84,7 +85,7 @@ inline void MulticastSender::stop()
     LOG_INFO("{} stopped", name_);
 }
 
-inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
+inline bool MulticastSender::send_data(const uint8_t* data, size_t size)
 {
     // Holds the socket open for the duration of the send, even if another thread stops the sender
     detail::SendGate::Pass pass(send_gate_);
@@ -94,21 +95,14 @@ inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
         return false;
     }
 
-    if (data.empty())
+    if (size == 0)
     {
         LOG_WARN("Cannot send empty data");
         return false;
     }
 
-    // Create destination address
-    sockaddr_in dest_addr{};
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(config_.port);
-    
-    int result = inet_pton(AF_INET, config_.multicast_address.c_str(), &dest_addr.sin_addr);
-    if (result != 1)
+    if (!dest_addr_valid_)
     {
-        LOG_ERROR("Invalid multicast address: {}", config_.multicast_address);
         send_errors_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -116,8 +110,8 @@ inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
     // The socket is non-blocking: a full send buffer is waited out in short slices, so a stop() on
     // another thread is noticed instead of this call staying blocked in sendto()
     int bytes_sent;
-    while ((bytes_sent = sendto(socket_, reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()),
-                                0, reinterpret_cast<const sockaddr*>(&dest_addr), sizeof(dest_addr))) == SOCKET_ERROR &&
+    while ((bytes_sent = sendto(socket_, reinterpret_cast<const char*>(data), static_cast<int>(size),
+                                0, reinterpret_cast<const sockaddr*>(&dest_addr_), sizeof(dest_addr_))) == SOCKET_ERROR &&
            WSAGetLastError() == WSAEWOULDBLOCK)
     {
         if (!running_.load(std::memory_order_relaxed))
@@ -136,9 +130,9 @@ inline bool MulticastSender::send_data(const std::vector<uint8_t>& data)
         return false;
     }
 
-    if (static_cast<size_t>(bytes_sent) != data.size())
+    if (static_cast<size_t>(bytes_sent) != size)
     {
-        LOG_WARN("Partial send: {} bytes sent out of {}", bytes_sent, data.size());
+        LOG_WARN("Partial send: {} bytes sent out of {}", bytes_sent, size);
     }
 
     packets_sent_.fetch_add(1, std::memory_order_relaxed);

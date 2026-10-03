@@ -1070,3 +1070,59 @@ TEST_F(TCPIntegrationTest, ClientSendDoesNotSpinWhenServerStalls) {
         return server_->bytes_received.load() == static_cast<size_t>(max_messages) * message.size();
     }, 20000));
 }
+
+// A server that declares onPoll(): pushes a queued message to a client with no client traffic to
+// trigger it, which is what a gateway draining another thread's queue needs.
+class PollingServer : public slick::socket::TCPServerBase<PollingServer>
+{
+public:
+    using slick::socket::TCPServerBase<PollingServer>::TCPServerBase;
+
+    void onClientConnected(int client_id, const std::string&) { client_id_ = client_id; }
+    void onClientDisconnected(int) {}
+    void onClientData(int, const uint8_t*, size_t) {}
+
+    void onPoll() {
+        polls++;
+        if (poll_thread_id_ == std::thread::id{}) {
+            poll_thread_id_ = std::this_thread::get_id();
+        }
+        if (push_requested.exchange(false)) {
+            static constexpr uint8_t payload[] = {'p', 'o', 'l', 'l', 'e', 'd'};
+            push_sent = send_data(client_id_.load(), payload, sizeof(payload));
+        }
+    }
+
+    std::thread::id poll_thread_id() const { return poll_thread_id_; }
+    std::thread::id server_thread_id() const { return server_thread_.get_id(); }
+
+    std::atomic<int> client_id_{-1};
+    std::atomic<uint64_t> polls{0};
+    std::atomic<bool> push_requested{false};
+    std::atomic<bool> push_sent{false};
+
+private:
+    std::atomic<std::thread::id> poll_thread_id_{};
+};
+
+TEST_F(TCPIntegrationTest, OnPollRunsOnServerThreadAndCanSend) {
+    auto server = std::make_unique<PollingServer>("PollingServer", server_config_);
+    ASSERT_TRUE(server->start());
+    client_config_.server_port = server->port();
+
+    // Called with no traffic at all
+    ASSERT_TRUE(waitForCondition([&]() { return server->polls.load() > 10; }));
+    EXPECT_EQ(server->poll_thread_id(), server->server_thread_id());
+
+    client_ = connectClient("PollClient");
+    ASSERT_TRUE(waitForCondition([&]() { return server->client_id_.load() != -1; }));
+
+    // The client never sends anything: the data originates in onPoll()
+    server->push_requested = true;
+    ASSERT_TRUE(waitForCondition([&]() { return client_->received_data() == "polled"; }));
+    EXPECT_TRUE(server->push_sent.load());
+
+    client_->disconnect();
+    server->stop();
+}
+

@@ -54,7 +54,7 @@ set(BUILD_SLICK_SOCKET_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     slick-socket
     GIT_REPOSITORY https://github.com/SlickQuant/slick-socket.git
-    GIT_TAG v1.1.0  # Use the desired version
+    GIT_TAG v1.2.0  # Use the desired version
 )
 
 FetchContent_MakeAvailable(slick-socket)
@@ -204,6 +204,8 @@ Server configuration notes:
 - `onClientDisconnected()` fires exactly once for every client that leaves, whether the peer closed, an I/O error occurred, or the server called `disconnect_client()`. A disconnect triggered from a callback, including a failed `send_data()`, is reported after that callback returns, never from inside it. Clients still connected when the server stops are closed without this callback.
 - slick-socket never changes the process's signal handling. On Unix, writing to a peer that has closed the connection fails the send (and disconnects) instead of raising `SIGPIPE`, using `MSG_NOSIGNAL` and, where available (macOS/BSD), `SO_NOSIGPIPE` on each TCP socket. This applies to `TCPClientBase` too.
 - `send_data()` never blocks the server thread. Data a slow client cannot take right away is queued per client and flushed when its socket becomes writable. If queuing a message could exceed `TCPServerConfig::max_pending_send_bytes` (default 16 MiB, `0` = unlimited), `send_data()` returns `false` and drops that whole message before writing any of it, so the stream stays intact. A single message larger than the limit is therefore always rejected. Call `send_data()` / `disconnect_client()` on the server thread, i.e. from a server callback.
+- `send_data(client_id, const uint8_t* data, size_t size)` sends straight from your buffer; the `std::vector`/`std::string` overloads forward to it, so neither copies.
+- **Optional `onPoll()`:** declare a public `void onPoll()` in the derived class and the server thread calls it once per loop iteration, whether or not any event arrived. It is the place for traffic that does not originate from a client, such as draining a queue another thread fills or firing timers, because `send_data()` and `disconnect_client()` may be called from it. It is detected at compile time, so a server without it pays nothing. Iterations run back to back with `cpu_affinity` set and at most about 1 ms apart otherwise.
 - With `cpu_affinity` set, the server thread busy-polls for the lowest latency; otherwise it blocks in the event loop.
 
 ### Creating a TCP Client
@@ -295,7 +297,7 @@ int main()
 }
 ```
 
-`send_data()` may be called from any number of threads, including while another thread calls `stop()`: the socket is not closed until every send in progress has finished. Sends take no lock and each call sends one datagram. If the send buffer is full, `send_data()` waits for room, but returns `false` within about 1 ms once `stop()` is called, so a stalled network cannot hold up `stop()`.
+`send_data()` may be called from any number of threads, including while another thread calls `stop()`: the socket is not closed until every send in progress has finished. Sends take no lock and each call sends one datagram. `send_data(const uint8_t* data, size_t size)` sends straight from your buffer, so a publisher building packets in place does not copy or allocate per datagram. The group address is resolved once in `start()`; an invalid address is logged there and every send then fails and counts a send error. If the send buffer is full, `send_data()` waits for room, but returns `false` within about 1 ms once `stop()` is called, so a stalled network cannot hold up `stop()`.
 
 ### Creating a Multicast Receiver
 
@@ -346,7 +348,7 @@ int main()
 | --- | --- |
 | Control: `start()`/`stop()` (server, multicast sender and receiver), `connect()`/`disconnect()` (client) | One thread at a time per object. These replace the socket and worker thread and are not synchronized against each other, so overlapping them (e.g. `stop()` on one thread while `start()` runs on another) is undefined. The one supported overlap is `stop()`/`disconnect()` from the object's own callback while another thread calls `stop()`/`disconnect()`: on the worker thread it only flags the shutdown. |
 | `send_data()` on `TCPClientBase` and `MulticastSender` | Any thread, concurrently with each other and with the control calls. |
-| `send_data()`/`disconnect_client()` on `TCPServerBase` | The server thread only, i.e. from a server callback. |
+| `send_data()`/`disconnect_client()` on `TCPServerBase` | The server thread only, i.e. from a server callback, including `onPoll()`. |
 | `is_running()`, `is_connected()`, `get_connected_client_count()`, statistics getters | Any thread. |
 
 For more examples, see the [examples/](examples/) directory.

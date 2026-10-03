@@ -1,3 +1,12 @@
+#v1.2.0 - [10/03/2026]
+TCP server:
+- Added optional `onPoll()` hook: a derived server that declares a public `void onPoll()` gets it called once per loop iteration on the server thread, so it can call `send_data()`/`disconnect_client()` for traffic not triggered by a client (detected at compile time, zero cost when absent)
+- Added `send_data(client_id, const uint8_t* data, size_t size)`; the `std::vector`/`std::string` overloads forward to it without copying
+
+Multicast:
+- Added `MulticastSender::send_data(const uint8_t* data, size_t size)`; the `std::vector`/`std::string` overloads forward to it without copying
+- The group address is resolved once in `start()` instead of on every send; an invalid address is logged there and every send then fails and counts a send error
+
 #v1.1.0 - [10/02/2026]
 Breaking changes:
 - Replaced the unused `TCPServerConfig::connection_timeout` with `idle_timeout` (default 0 = disabled), which disconnects clients with no traffic in either direction

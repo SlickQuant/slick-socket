@@ -15,6 +15,9 @@
 #if defined(_WIN32) || defined(_WIN64)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #endif
 
 namespace slick::socket
@@ -57,11 +60,17 @@ public:
     // Safe to call from any number of threads, including concurrently with stop(): the socket is never
     // closed while a send is using it. Each call sends one datagram. If the send buffer is full, it
     // waits for room, but gives up (returns false) within poll_interval_ms once stop() is called.
-    bool send_data(const std::vector<uint8_t>& data);
+    //
+    // The pointer form is the primitive: it sends straight from the caller's buffer, so a publisher
+    // that builds packets in place never copies or allocates per datagram.
+    bool send_data(const uint8_t* data, size_t size);
+    bool send_data(const std::vector<uint8_t>& data)
+    {
+        return send_data(data.data(), data.size());
+    }
     bool send_data(const std::string& data)
     {
-        std::vector<uint8_t> buffer(data.begin(), data.end());
-        return send_data(buffer);
+        return send_data(reinterpret_cast<const uint8_t*>(data.data()), data.size());
     }
 
     // Statistics
@@ -96,13 +105,32 @@ protected:
 
     SocketT socket_ = invalid_socket;
     detail::SendGate send_gate_;  // keeps socket_ open while send_data() uses it from other threads
-    
+
+    // The group address, resolved once by start() rather than parsed on every send. Written before
+    // send_gate_ opens, so every send_data() that gets past the gate sees it complete.
+    sockaddr_in dest_addr_{};
+    bool dest_addr_valid_ = false;
+
     // Statistics
     std::atomic<uint64_t> packets_sent_{0};
     std::atomic<uint64_t> bytes_sent_{0};
     std::atomic<uint64_t> send_errors_{0};
 
 private:
+    // Resolves config_.multicast_address into dest_addr_. An invalid address is not a start() failure:
+    // it is reported, and every send then fails and counts a send error.
+    void resolve_destination()
+    {
+        dest_addr_ = sockaddr_in{};
+        dest_addr_.sin_family = AF_INET;
+        dest_addr_.sin_port = htons(config_.port);
+        dest_addr_valid_ = inet_pton(AF_INET, config_.multicast_address.c_str(), &dest_addr_.sin_addr) == 1;
+        if (!dest_addr_valid_)
+        {
+            LOG_ERROR("Invalid multicast address: {}", config_.multicast_address);
+        }
+    }
+
     bool initialize_socket();
     void cleanup_socket();
     bool setup_multicast_options();
