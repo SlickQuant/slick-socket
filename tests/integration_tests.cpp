@@ -1120,7 +1120,8 @@ TEST_F(TCPIntegrationTest, OnPollRunsOnServerThreadAndCanSend) {
     // The client never sends anything: the data originates in onPoll()
     server->push_requested = true;
     ASSERT_TRUE(waitForCondition([&]() { return client_->received_data() == "polled"; }));
-    EXPECT_TRUE(server->push_sent.load());
+    // The client can receive the data before onPoll() stores send_data()'s result, so wait for it too
+    EXPECT_TRUE(waitForCondition([&]() { return server->push_sent.load(); }));
 
     client_->disconnect();
     server->stop();
