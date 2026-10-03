@@ -40,6 +40,8 @@ Then use CMake with the vcpkg toolchain:
 cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=[path-to-vcpkg]/scripts/buildsystems/vcpkg.cmake
 ```
 
+vcpkg's Release (`lib/wepoll.lib`) and Debug (`debug/lib/wepoll.lib`) builds are both found, and each build configuration links its own, so Debug and Release never mix C runtimes. This applies to the slick-socket build and to `find_package(slick-socket)` consumers. To use other wepoll libraries, set `WEPOLL_INCLUDE_DIR` plus either `WEPOLL_LIBRARY_RELEASE`/`WEPOLL_LIBRARY_DEBUG`, or `WEPOLL_LIBRARY` for a single library used by every configuration.
+
 ### Using FetchContent
 
 The easiest way to use slick-socket is to fetch it directly in your CMakeLists.txt:

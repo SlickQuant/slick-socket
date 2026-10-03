@@ -19,16 +19,11 @@ if(WIN32)
             add_library(wepoll::wepoll ALIAS slick::wepoll)
         else()
             # Find wepoll manually (vcpkg installations don't provide CMake config)
-            find_path(WEPOLL_INCLUDE_DIR wepoll.h REQUIRED)
-            find_library(WEPOLL_LIBRARY NAMES wepoll REQUIRED)
-
-            if(WEPOLL_INCLUDE_DIR AND WEPOLL_LIBRARY)
-                # Create an imported target for wepoll
-                add_library(wepoll::wepoll STATIC IMPORTED)
-                set_target_properties(wepoll::wepoll PROPERTIES
-                    IMPORTED_LOCATION "${WEPOLL_LIBRARY}"
-                    INTERFACE_INCLUDE_DIRECTORIES "${WEPOLL_INCLUDE_DIR}"
-                )
+            include("${CMAKE_CURRENT_LIST_DIR}/FindWepoll.cmake")
+            if(NOT TARGET wepoll::wepoll)
+                set(slick-socket_FOUND FALSE)
+                set(slick-socket_NOT_FOUND_MESSAGE "wepoll headers and library are required")
+                return()
             endif()
         endif()
     endif()

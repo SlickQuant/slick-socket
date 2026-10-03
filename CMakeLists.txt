@@ -29,17 +29,10 @@ endfunction()
 
 if(WIN32)
   # Find wepoll (vcpkg installation without CMake config)
-  find_path(WEPOLL_INCLUDE_DIR wepoll.h)
-  find_library(WEPOLL_LIBRARY NAMES wepoll)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindWepoll.cmake)
 
-  if(WEPOLL_INCLUDE_DIR AND WEPOLL_LIBRARY)
-    # Create an imported target for wepoll
-    add_library(wepoll::wepoll STATIC IMPORTED)
-    set_target_properties(wepoll::wepoll PROPERTIES
-      IMPORTED_LOCATION "${WEPOLL_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${WEPOLL_INCLUDE_DIR}"
-    )
-    message(STATUS "wepoll: found at ${WEPOLL_LIBRARY}")
+  if(TARGET wepoll::wepoll)
+    message(STATUS "wepoll: found locally")
   else()
     # Fallback: Fetch wepoll from GitHub and build it
     message(STATUS "wepoll not found locally, fetching from GitHub...")
@@ -183,6 +176,7 @@ write_basic_package_version_file(
 
 # Install the config and version files
 install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindWepoll.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/slick-socketConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/slick-socketConfigVersion.cmake
   DESTINATION lib/cmake/slick-socket

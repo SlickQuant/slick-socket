@@ -17,6 +17,17 @@ endif()
 # Include Google Test
 include(GoogleTest)
 
+if(WIN32)
+    find_program(SLICK_SOCKET_NINJA ninja)
+    if(SLICK_SOCKET_NINJA)
+        add_test(NAME WepollPackageSelection COMMAND ${CMAKE_COMMAND}
+            -DTEST_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+            -DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/wepoll_package_selection
+            -DTEST_NINJA=${SLICK_SOCKET_NINJA}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/wepoll_package_selection.cmake)
+    endif()
+endif()
+
 # Network Tests
 add_executable(tests
     tcp_server_tests.cpp
@@ -82,7 +93,12 @@ set_tests_properties(InstallPackage PROPERTIES FIXTURES_SETUP slick_socket_insta
 # Pinned to the fresh install, so another slick-socket on the search path (e.g. from vcpkg) cannot be used instead
 set(consumer_options -Dslick-socket_DIR=${SLICK_SOCKET_TEST_PREFIX}/lib/cmake/slick-socket)
 if(WIN32 AND NOT SLICK_SOCKET_INSTALL_WEPOLL)
-    list(APPEND consumer_options -DWEPOLL_INCLUDE_DIR=${WEPOLL_INCLUDE_DIR} -DWEPOLL_LIBRARY=${WEPOLL_LIBRARY})
+    list(APPEND consumer_options -DWEPOLL_INCLUDE_DIR=${WEPOLL_INCLUDE_DIR})
+    foreach(variable WEPOLL_LIBRARY WEPOLL_LIBRARY_RELEASE WEPOLL_LIBRARY_DEBUG)
+        if(${variable})
+            list(APPEND consumer_options -D${variable}=${${variable}})
+        endif()
+    endforeach()
 endif()
 if(NOT CMAKE_GENERATOR MATCHES "^Visual Studio")
     list(APPEND consumer_options -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER} -DCMAKE_BUILD_TYPE=$<CONFIG>)
