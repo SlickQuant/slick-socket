@@ -15,6 +15,7 @@ A header-only C++20 networking library providing cross-platform TCP and UDP mult
 - **Asynchronous**: Non-blocking socket operations with timeout handling
 - **TCP Communication**: Client and server implementations
 - **UDP Multicast**: One-to-many communication support
+- **Caller-driven sockets**: A TCP client and a multicast receiver with no thread of their own, read from your own loop with no allocation or hand-off per packet
 - **Logging**: Pluggable via `LOG_DEBUG`/`LOG_INFO`/`LOG_WARN`/`LOG_ERROR`/`LOG_TRACE` macros defined before including the headers; no-op by default
 
 ## Dependencies
@@ -344,6 +345,71 @@ int main()
 
 `stop()` may be called from `handle_multicast_data()`; the receiver thread leaves the group and closes its socket once the callback returns.
 
+### Caller-driven sockets
+
+`TCPClientBase` and `MulticastReceiverBase` each run a thread and hand you data in a callback.
+`PolledTCPClient` and `PolledMulticastReceiver` run none: your own loop asks them for data, and a
+call that finds nothing returns at once. A thread that busy-polls then reads the bytes itself, with
+no wake-up, no hand-off between threads and no allocation per packet, and one thread can serve any
+number of sockets in whatever order it chooses.
+
+```cpp
+#include <slick/socket/polled_tcp_client.h>
+#include <slick/socket/polled_multicast_receiver.h>
+#include <array>
+
+int main()
+{
+    slick::socket::PolledTCPClientConfig tcp;
+    tcp.server_address = "127.0.0.1";
+    tcp.server_port = 5000;
+    slick::socket::PolledTCPClient client("OrderEntry", tcp);
+    client.connect();                       // returns at once; poll() completes it
+
+    slick::socket::PolledMulticastReceiverConfig group;
+    group.multicast_address = "224.0.0.1";
+    group.port = 5001;
+    group.receive_buffer_size = 4 << 20;    // what the kernel holds between two receive() calls
+    slick::socket::PolledMulticastReceiver feed("Feed", group);
+    feed.open();
+
+    std::array<uint8_t, 1500> packet;
+    std::array<uint8_t, 65536> stream;
+    for (;;)
+    {
+        if (const auto size = feed.receive(packet); size > 0)
+        {
+            // one datagram, in packet[0 .. size)
+        }
+
+        using State = slick::socket::PolledTCPClient::State;
+        if (client.state() == State::Connecting)
+        {
+            client.poll();                  // made, failed or timed out
+        }
+        else if (const auto size = client.receive(stream); size > 0)
+        {
+            // stream[0 .. size) - the next bytes of the TCP stream
+        }
+        else if (size < 0)
+        {
+            client.connect();               // the connection is gone: start another
+        }
+    }
+}
+```
+
+| Call | Returns |
+| --- | --- |
+| `PolledTCPClient::connect()` | `false` when the attempt could not be started. Never waits for the network; a hostname is resolved here, which can block, an IPv4 literal is not |
+| `PolledTCPClient::poll()` | The state: `Connecting` until the connection is made (`Connected`), fails or passes `connection_timeout` (`Disconnected`) |
+| `PolledTCPClient::receive(buffer)` | Bytes read, `0` when nothing is waiting, `-1` when the connection is gone |
+| `PolledTCPClient::send(data)` | `false` when not all of it could be sent; the connection is then closed. Waits up to `send_timeout` for a server that has stopped reading |
+| `PolledMulticastReceiver::receive(buffer)` | The datagram's size, `0` when none is waiting, `-1` on an error. One longer than the buffer is cut to it and counted by `get_packets_truncated()` |
+
+`PolledTCPClient` sets `TCP_NODELAY` by default, so each `send()` leaves at once. Both classes are for
+one thread: nothing in them is synchronized.
+
 ### Threading
 
 | Calls | Thread rule |
@@ -352,6 +418,7 @@ int main()
 | `send_data()` on `TCPClientBase` and `MulticastSender` | Any thread, concurrently with each other and with the control calls. |
 | `send_data()`/`disconnect_client()` on `TCPServerBase` | The server thread only, i.e. from a server callback, including `onPoll()`. |
 | `is_running()`, `is_connected()`, `get_connected_client_count()`, statistics getters | Any thread. |
+| Everything on `PolledTCPClient` and `PolledMulticastReceiver` | The one thread that owns the object. |
 
 For more examples, see the [examples/](examples/) directory.
 
@@ -412,6 +479,9 @@ slick-socket/
 │   ├── tcp_client.h          # TCP client base class
 │   ├── multicast_sender.h    # UDP multicast sender
 │   ├── multicast_receiver.h  # UDP multicast receiver
+│   ├── polled_tcp_client.h   # Caller-driven TCP client (no thread, no callbacks)
+│   ├── polled_multicast_receiver.h # Caller-driven UDP multicast receiver
+│   ├── polled_socket.h       # What the caller-driven sockets share across platforms (internal)
 │   ├── *_win32.h / *_unix.h  # Platform implementations, included by the headers above
 │   ├── worker_thread.h       # Worker-thread identity helper (internal)
 │   ├── send_gate.h           # Lock-free guard keeping a socket open during send_data() (internal)
@@ -431,7 +501,7 @@ The library uses a three-file pattern for cross-platform support:
 - `component_win32.h` - Windows implementation
 - `component_unix.h` - Unix/Linux implementation
 
-Most components use CRTP (Curiously Recurring Template Pattern) for compile-time polymorphism without virtual function overhead. `MulticastSender` is implemented as a regular class without CRTP for simpler usage.
+Most components use CRTP (Curiously Recurring Template Pattern) for compile-time polymorphism without virtual function overhead. `MulticastSender` is implemented as a regular class without CRTP for simpler usage, and so are the caller-driven `PolledTCPClient` and `PolledMulticastReceiver`, which make no callbacks; each of those is one header, with its few platform differences in `polled_socket.h`.
 
 ## License
 

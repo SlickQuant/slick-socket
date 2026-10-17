@@ -1,3 +1,17 @@
+#v1.3.0 - [10/17/2026]
+Caller-driven sockets (new): a TCP client and a multicast receiver that own no thread and make no callbacks. The caller's loop reads from them directly, with no hand-off between threads and no allocation per packet, and one thread can serve any number of them. Each is for the one thread that owns it.
+
+TCP client:
+- Added `PolledTCPClient` (`polled_tcp_client.h`). `connect()` returns at once, and `poll()` completes the connection or reports that it failed or passed `connection_timeout`. Calling `connect()` again after a disconnect reconnects
+- `receive()` reads into the caller's buffer without blocking: it returns the bytes read, `0` when nothing is waiting, or `-1` when the connection is gone
+- `send()` writes straight from the caller's buffer and waits up to `send_timeout` for a server that has stopped reading. If it cannot send everything, it closes the connection and returns `false`
+- `PolledTCPClientConfig` sets `TCP_NODELAY` by default and can set `SO_RCVBUF`/`SO_SNDBUF`
+
+Multicast:
+- Added `PolledMulticastReceiver` (`polled_multicast_receiver.h`). `receive()` reads one datagram into the caller's buffer without blocking: it returns the datagram's size, `0` when none is waiting, or `-1` on an error, and the receiver stays open after an error
+- A datagram longer than the buffer is cut to the buffer's size and counted by `get_packets_truncated()`
+- `PolledMulticastReceiverConfig::receive_buffer_size` sets `SO_RCVBUF`, which is how much the kernel holds between two `receive()` calls
+
 #v1.2.0 - [10/03/2026]
 TCP server:
 - Added optional `onPoll()` hook: a derived server that declares a public `void onPoll()` gets it called once per loop iteration on the server thread, so it can call `send_data()`/`disconnect_client()` for traffic not triggered by a client (detected at compile time, zero cost when absent)

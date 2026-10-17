@@ -37,6 +37,7 @@ add_executable(tests
     multicast_receiver_tests.cpp
     build_config_tests.cpp
     send_gate_tests.cpp
+    polled_socket_tests.cpp
 )
 
 target_link_libraries(tests
