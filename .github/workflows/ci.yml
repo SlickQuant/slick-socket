@@ -30,3 +30,15 @@ jobs:
     - name: Run Tests
       working-directory: build
       run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+    # --output-on-failure shows only failed tests' output; a skipped test's reason is left in the log
+    - name: Show Skipped Test Reasons
+      if: always()
+      shell: bash
+      run: |
+        log=build/Testing/Temporary/LastTest.log
+        [ -f "$log" ] || exit 0  # the tests never ran
+        awk '{ sub(/\r$/, "") }
+             /^\[ RUN      \]/ { test = $4 }
+             /: Skipped$/ { getline reason; sub(/\r$/, "", reason); print test ": " reason; skipped++ }
+             END { if (!skipped) print "No tests were skipped" }' "$log"
