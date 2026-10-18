@@ -5,7 +5,9 @@
 #include <slick/socket/tcp_server.h>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <thread>
@@ -260,7 +262,43 @@ protected:
     MulticastSenderConfig sender_config_;
 };
 
+// Sends `message`. Returns an empty string when that worked, otherwise why not: the OS error sendto()
+// left, which send_data() does not overwrite on its way out. The error is cleared first, so a send that
+// failed before reaching sendto() is not blamed on an earlier call.
+std::string send_failure(MulticastSender& sender, const std::string& message)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    WSASetLastError(0);
+#else
+    errno = 0;
+#endif
+    if (sender.send_data(message))
+    {
+        return {};
+    }
+
+    const int error = detail::last_socket_error();
+    if (error == 0)
+    {
+        return "send_data() failed without an OS error";
+    }
+#if defined(_WIN32) || defined(_WIN64)
+    return "error " + std::to_string(error);
+#else
+    return "error " + std::to_string(error) + " (" + std::strerror(error) + ")";
+#endif
+}
+
 } // namespace
+
+// A test's first send. Where this host cannot send multicast at all, as on GitHub's macOS runners, there
+// is nothing for the receiver to read, so the test is skipped as the MulticastSender tests are, saying
+// why the send failed. Once one send has worked, later ones must too.
+#define SEND_FIRST_OR_SKIP(sender, message)                                                      \
+    if (const std::string failure = send_failure((sender), (message)); !failure.empty())        \
+    {                                                                                            \
+        GTEST_SKIP() << "Multicast sending not available in this environment: " << failure;     \
+    }
 
 TEST_F(PolledMulticastReceiverTest, OpensAndCloses)
 {
@@ -294,7 +332,7 @@ TEST_F(PolledMulticastReceiverTest, ReceivesDatagramsOneAtATimeInOrder)
     MulticastSender sender("Sender", sender_config_);
     ASSERT_TRUE(sender.start());
 
-    ASSERT_TRUE(sender.send_data(std::string("first")));
+    SEND_FIRST_OR_SKIP(sender, "first");
     ASSERT_TRUE(sender.send_data(std::string("second datagram")));
 
     // Each call hands over exactly one datagram: boundaries are kept
@@ -317,7 +355,7 @@ TEST_F(PolledMulticastReceiverTest, DatagramLongerThanTheBufferIsCutAndCounted)
     MulticastSender sender("Sender", sender_config_);
     ASSERT_TRUE(sender.start());
 
-    ASSERT_TRUE(sender.send_data(std::string("0123456789")));
+    SEND_FIRST_OR_SKIP(sender, "0123456789");
     ASSERT_TRUE(sender.send_data(std::string("next")));
 
     std::array<uint8_t, 4> tiny{};
@@ -339,7 +377,7 @@ TEST_F(PolledMulticastReceiverTest, TwoReceiversOnOnePortBothHearTheGroup)
     ASSERT_TRUE(second.open());
     MulticastSender sender("Sender", sender_config_);
     ASSERT_TRUE(sender.start());
-    ASSERT_TRUE(sender.send_data(std::string("both")));
+    SEND_FIRST_OR_SKIP(sender, "both");
 
     std::array<uint8_t, 64> buffer{};
     EXPECT_EQ(receive_one(first, buffer), "both");
@@ -356,7 +394,7 @@ TEST_F(PolledMulticastReceiverTest, ReopensAfterClose)
 
     MulticastSender sender("Sender", sender_config_);
     ASSERT_TRUE(sender.start());
-    ASSERT_TRUE(sender.send_data(std::string("again")));
+    SEND_FIRST_OR_SKIP(sender, "again");
     std::array<uint8_t, 64> buffer{};
     EXPECT_EQ(receive_one(receiver, buffer), "again");
     sender.stop();
