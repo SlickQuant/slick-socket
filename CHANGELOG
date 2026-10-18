@@ -1,4 +1,4 @@
-#v1.3.0 - [10/17/2026]
+#v1.3.0 - [10/18/2026]
 Added caller-driven sockets, a TCP client and a multicast receiver that run no thread of their own and make no callbacks. The caller's loop reads from them directly, without handing data between threads or allocating per packet, and one thread can drive any number of them. Use each socket only from the thread that owns it.
 
 TCP client:
