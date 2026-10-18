@@ -159,6 +159,7 @@ protected:
     detail::WorkerThreadId client_thread_id_;
     SocketT socket_ = invalid_socket;
     detail::SendGate send_gate_;  // keeps socket_ open while send_data() uses it from other threads
+    bool connect_result_ = false;  // what the latest finish_connect() returns; only the connect() thread uses it
 };
 
 template<typename DerivedT>
@@ -171,8 +172,9 @@ inline bool TCPClientBase<DerivedT>::finish_connect()
     // onConnected() may have changed the connection before the client thread exists
     if (client_thread_.joinable())
     {
-        // It reconnected (disconnect() then connect()); that connect() started the client thread
-        return connected_.load(std::memory_order_relaxed);
+        // It reconnected (disconnect() then connect()); that connect() started the client thread and
+        // decided the result
+        return connect_result_;
     }
     if (socket_ == invalid_socket)
     {
@@ -180,10 +182,13 @@ inline bool TCPClientBase<DerivedT>::finish_connect()
         return false;
     }
 
+    // Decided before the client thread starts: once running, it may clear connected_ for a connection
+    // that was made (e.g. the server closed it at once), and that loss is onDisconnected()'s to report.
+    connect_result_ = connected_.load(std::memory_order_relaxed);
     // Started even if a send in onConnected() already found the connection broken: the loop then
     // sees connected_ cleared, reports onDisconnected() and exits, as for any lost connection
     client_thread_ = std::thread(&TCPClientBase::client_loop, this);
-    return connected_.load(std::memory_order_relaxed);
+    return connect_result_;
 }
 
 template<typename DerivedT>

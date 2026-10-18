@@ -174,8 +174,8 @@ public:
     using slick::socket::TCPClientBase<IntegrationTestClient>::TCPClientBase;
 
     void onConnected() {
-        if (slow_on_connected) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // post-connect setup
+        if (const int delay_ms = on_connected_delay_ms.load(); delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));  // post-connect setup
         }
         if (disconnect_in_on_connected.exchange(false)) {
             disconnect();
@@ -239,7 +239,7 @@ public:
     std::atomic<bool> late_send_failed{false};
     std::atomic<bool> connect_in_on_disconnected{false};
     std::atomic<int> callback_connect_result{-1};
-    std::atomic<bool> slow_on_connected{false};
+    std::atomic<int> on_connected_delay_ms{0};
     std::atomic<bool> on_connected_returned{false};
     std::atomic<bool> data_before_on_connected{false};
     std::atomic<bool> disconnect_in_on_connected{false};
@@ -583,6 +583,30 @@ TEST_F(TCPIntegrationTest, MaxConnectionsEnforced) {
     rejected->disconnect();
 }
 
+// connect() reports that the connection was made even when the server closes it at once: the client
+// thread may see the close before connect() returns, and that loss is onDisconnected()'s to report
+TEST_F(TCPIntegrationTest, ConnectSucceedsWhenServerClosesAtOnce) {
+    server_config_.max_connections = 1;
+    ASSERT_NO_FATAL_FAILURE(startServer());
+    client_ = connectClient("Holder");
+    ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 1; }));
+
+    // Each attempt is accepted and closed by the full server. The delay in onConnected() lets the close
+    // arrive first, so the client thread finds it the moment it starts, racing connect()'s return.
+    auto rejected = std::make_unique<IntegrationTestClient>("Rejected", client_config_);
+    rejected->on_connected_delay_ms = 2;
+    for (int attempt = 1; attempt <= 50; ++attempt) {
+        ASSERT_TRUE(rejected->connect()) << "attempt " << attempt;
+        ASSERT_TRUE(waitForCondition([&]() { return rejected->disconnected_count.load() == attempt; }))
+            << "attempt " << attempt;
+        EXPECT_EQ(rejected->connected_count.load(), attempt);
+    }
+    EXPECT_EQ(server_->connected_clients.load(), 1);
+
+    rejected->disconnect();
+    client_->disconnect();
+}
+
 TEST_F(TCPIntegrationTest, StopFromServerCallback) {
     ASSERT_NO_FATAL_FAILURE(startServer());
     client_ = connectClient("IntegrationClient");
@@ -830,7 +854,7 @@ TEST_F(TCPIntegrationTest, OnConnectedCompletesBeforeOnData) {
     server_->greet_on_connect = true;
 
     client_ = std::make_unique<IntegrationTestClient>("IntegrationClient", client_config_);
-    client_->slow_on_connected = true;
+    client_->on_connected_delay_ms = 100;
     ASSERT_TRUE(client_->connect());
     ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "hello"; }));
     EXPECT_FALSE(client_->data_before_on_connected.load());

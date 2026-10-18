@@ -261,7 +261,7 @@ int main()
 
 `onConnected()` runs on the thread that calls `connect()`, before the client thread starts, so `onData()` and `onDisconnected()` never run until it has returned; data the server sends meanwhile waits in the socket. Calling `disconnect()` from `onConnected()` reports `onDisconnected()` right away and makes `connect()` return `false`.
 
-If the server closes the connection, or a `send_data()` finds it broken, `onDisconnected()` is called and `is_connected()` becomes false. Calling `connect()` again reconnects the same client object, but not from the client's own callbacks: there `connect()` returns `false`, because it must first join the finished client thread, which is the calling thread. To reconnect after `onDisconnected()`, have the callback signal another thread to call `connect()`.
+If the server closes the connection, or a `send_data()` finds it broken, `onDisconnected()` is called and `is_connected()` becomes false. That holds even when it happens straight after the connection is made: `connect()` still returns `true`, and `onDisconnected()` reports the loss. Calling `connect()` again reconnects the same client object, but not from the client's own callbacks: there `connect()` returns `false`, because it must first join the finished client thread, which is the calling thread. To reconnect after `onDisconnected()`, have the callback signal another thread to call `connect()`.
 
 The client thread blocks in `poll()` while idle; setting `TCPClientConfig::cpu_affinity` pins it to a core and switches to busy-polling `recv()` for the lowest latency. `send_data()` blocks the calling thread (without spinning) until the server has accepted all of the data.
 
