@@ -36,7 +36,7 @@ struct PolledTCPClientConfig
 //
 // Not thread-safe: every member is for the one thread that owns the object. For a client with its own
 // thread and callbacks, see TCPClientBase (tcp_client.h).
-class PolledTCPClient
+class PolledTCPClient : private detail::SocketRuntime
 {
 public:
     enum class State : uint8_t
@@ -259,7 +259,6 @@ private:
         state_ = State::Disconnected;
     }
 
-    detail::SocketRuntime runtime_;
     std::string name_;
     PolledTCPClientConfig config_;
     detail::PolledSocket socket_ = detail::invalid_polled_socket;

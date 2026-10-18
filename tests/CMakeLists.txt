@@ -12,6 +12,18 @@ if(NOT GTest_FOUND)
     # For Windows: Prevent overriding the parent project's compiler/linker settings
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
+
+    # googletest's own PrintTo(char8_t/char16_t) trips newer clang's -Wcharacter-conversion
+    # (google/googletest#4762); silence it for googletest only, where the compiler knows the warning
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(-Wcharacter-conversion SLICK_SOCKET_HAS_WCHARACTER_CONVERSION)
+    if(SLICK_SOCKET_HAS_WCHARACTER_CONVERSION)
+        foreach(gtest_target gtest gtest_main gmock gmock_main)
+            if(TARGET ${gtest_target})
+                target_compile_options(${gtest_target} PRIVATE -Wno-character-conversion)
+            endif()
+        endforeach()
+    endif()
 endif()
 
 # Include Google Test

@@ -33,7 +33,7 @@ struct PolledMulticastReceiverConfig
 //
 // Not thread-safe: every member is for the one thread that owns the object. For a receiver with its
 // own thread and a callback, see MulticastReceiverBase (multicast_receiver.h).
-class PolledMulticastReceiver
+class PolledMulticastReceiver : private detail::SocketRuntime
 {
 public:
     explicit PolledMulticastReceiver(std::string name,
@@ -191,7 +191,6 @@ private:
         }
     }
 
-    detail::SocketRuntime runtime_;
     std::string name_;
     PolledMulticastReceiverConfig config_;
     detail::PolledSocket socket_ = detail::invalid_polled_socket;

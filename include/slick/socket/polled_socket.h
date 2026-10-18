@@ -35,7 +35,8 @@ namespace slick::socket::detail
 using PolledSocket = SOCKET;
 inline constexpr PolledSocket invalid_polled_socket = INVALID_SOCKET;
 
-// Winsock is reference counted per process: every object holds one reference for its lifetime
+// Winsock is reference counted per process: every object holds one reference for its lifetime. A
+// private base of the polled sockets, so it is set up before their members and torn down after them.
 class SocketRuntime
 {
 public:
@@ -93,6 +94,7 @@ inline std::ptrdiff_t polled_send(PolledSocket socket, const uint8_t* data, size
 using PolledSocket = int;
 inline constexpr PolledSocket invalid_polled_socket = -1;
 
+// Nothing to set up; as an empty base it takes no space
 class SocketRuntime
 {
 };
