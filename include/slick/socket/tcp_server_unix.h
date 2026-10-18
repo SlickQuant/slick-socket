@@ -80,7 +80,7 @@ inline bool TCPServerBase<DerivedT>::start()
         }
     }
 
-    // Make socket non-blocking for select() usage
+    // Make the socket non-blocking
     int flags = fcntl(server_socket_, F_GETFL, 0);
     if (flags < 0 || fcntl(server_socket_, F_SETFL, flags | O_NONBLOCK) < 0)
     {
@@ -117,7 +117,7 @@ inline bool TCPServerBase<DerivedT>::start()
         config_.port = ntohs(server_addr.sin_port);
     }
 
-    // Set up the event loop here so a failure is reported by start() rather than a dead server thread
+    // Set up the event loop here, so start() reports a failure instead of leaving a dead server thread
     if (!create_event_loop())
     {
         close(server_socket_);
@@ -203,7 +203,7 @@ template<typename DerivedT>
 inline bool TCPServerBase<DerivedT>::create_event_loop()
 {
 #ifdef __APPLE__
-    // macOS: Use kqueue
+    // macOS uses kqueue
     epoll_fd_ = kqueue();
     if (epoll_fd_ < 0)
     {
@@ -221,7 +221,7 @@ inline bool TCPServerBase<DerivedT>::create_event_loop()
         return false;
     }
 #else
-    // Linux: Use epoll
+    // Linux uses epoll
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ < 0)
     {
@@ -291,7 +291,7 @@ void TCPServerBase<DerivedT>::server_loop()
     struct kevent events[MAX_EVENTS];
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
 
-    // Set timeout to 1us to allow checking running_ flag
+    // A 1us timeout lets the loop keep checking the running_ flag
     struct timespec timeout;
     timeout.tv_sec = 0;
     timeout.tv_nsec = 1000; // 1us
@@ -336,8 +336,8 @@ void TCPServerBase<DerivedT>::server_loop()
         end_iteration();
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
-    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    // The loop owns the sockets, so it releases them here. That way a stop() issued from a callback
+    // still cleans up, and after an event-loop failure is_running() doesn't report a dead server.
     running_.store(false, std::memory_order_release);
     release_resources();
 #else
@@ -348,7 +348,7 @@ void TCPServerBase<DerivedT>::server_loop()
     int timeout = 0;
     if (config_.cpu_affinity < 0)
     {
-        // CPU isn't pinned wait for 1 ms
+        // The CPU isn't pinned, so wait up to 1 ms
         timeout = 1;
     }
 
@@ -386,8 +386,8 @@ void TCPServerBase<DerivedT>::server_loop()
         end_iteration();
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
-    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    // The loop owns the sockets, so it releases them here. That way a stop() issued from a callback
+    // still cleans up, and after an event-loop failure is_running() doesn't report a dead server.
     running_.store(false, std::memory_order_release);
     release_resources();
 #endif
@@ -437,7 +437,7 @@ void TCPServerBase<DerivedT>::accept_new_client()
     }
 #else
     struct epoll_event ev;
-    ev.events = EPOLLIN;  // Level-triggered: data left over after one recv() is reported again
+    ev.events = EPOLLIN;  // Level-triggered, so data left over after one recv() is reported again
     ev.data.fd = client_socket;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_socket, &ev) < 0)
     {

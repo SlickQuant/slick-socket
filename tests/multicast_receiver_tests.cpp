@@ -2,6 +2,7 @@
 #include <type_traits>
 #include <slick/socket/multicast_receiver.h>
 #include <slick/socket/multicast_sender.h>
+#include "multicast_test_support.h"
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -219,15 +220,14 @@ TEST_F(MulticastReceiverTest, StopFromReceiveCallback) {
     slick::socket::MulticastSender sender("TestMulticastSender", sender_config);
     ASSERT_TRUE(sender.start());
 
-    // Keep sending until the callback runs (multicast loopback may be unavailable)
+    // Keep sending until the callback runs, because the first datagram may arrive before the group is joined
+    SEND_FIRST_OR_SKIP(sender, "stop");
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (receiver_->data_received_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        sender.send_data(std::string("stop"));
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        sender.send_data(std::string("stop"));
     }
-    if (receiver_->data_received_count.load() == 0) {
-        GTEST_SKIP() << "Multicast loopback not available in this environment";
-    }
+    ASSERT_GT(receiver_->data_received_count.load(), 0) << "No datagram looped back to the receiver";
 
     EXPECT_FALSE(receiver_->is_running());
     EXPECT_EQ(receiver_->data_received_count.load(), 1);

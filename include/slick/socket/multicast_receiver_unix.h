@@ -92,7 +92,7 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
 
     LOG_DEBUG("Receiver loop started for {}", name_);
 
-    // Receive timeout bounds how long stop() waits; set it once rather than per packet
+    // The receive timeout limits how long stop() waits. Set it once here instead of per packet.
     struct timeval timeout;
     timeout.tv_sec = config_.receive_timeout.count() / 1000;
     timeout.tv_usec = (config_.receive_timeout.count() % 1000) * 1000;
@@ -116,7 +116,7 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
             int error = errno;
             if (error == EAGAIN || error == EWOULDBLOCK)
             {
-                // Timeout is normal, continue loop
+                // A timeout is normal, so keep looping
                 continue;
             }
             else if (running_.load(std::memory_order_relaxed))
@@ -165,7 +165,7 @@ void MulticastReceiverBase<DerivedT>::release_socket()
 template<typename DerivedT>
 void MulticastReceiverBase<DerivedT>::handle_multicast_data(const std::vector<uint8_t>& data, const std::string& sender_address)
 {
-    // Default implementation - derived classes should override this
+    // Default implementation. Derived classes should override this.
     LOG_TRACE("Received {} bytes from {} (no handler implemented)", data.size(), sender_address);
 }
 

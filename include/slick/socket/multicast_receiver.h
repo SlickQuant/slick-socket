@@ -38,17 +38,17 @@ public:
     explicit MulticastReceiverBase(std::string name, const MulticastReceiverConfig& config = MulticastReceiverConfig());
     virtual ~MulticastReceiverBase();
 
-    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
+    // Not copyable or movable, because the object owns sockets and its worker thread holds `this`
     MulticastReceiverBase(const MulticastReceiverBase&) = delete;
     MulticastReceiverBase& operator=(const MulticastReceiverBase&) = delete;
     MulticastReceiverBase(MulticastReceiverBase&&) = delete;
     MulticastReceiverBase& operator=(MulticastReceiverBase&&) = delete;
 
     // Receiver control
-    // start()/stop() must not run concurrently with each other; call them from one thread at a time.
-    // They replace the socket and worker thread and are not synchronized against each other. The one
-    // supported overlap is stop() from handle_multicast_data() while another thread calls stop():
-    // on the worker thread, stop() only flags the shutdown.
+    // Call start() and stop() from one thread at a time. They replace the socket and the worker thread
+    // without synchronizing against each other. The one supported overlap is stop() from
+    // handle_multicast_data() while another thread calls stop(), because on the worker thread stop()
+    // only flags the shutdown.
     bool start();
     void stop();
 
@@ -77,14 +77,15 @@ protected:
     DerivedT& derived() { return static_cast<DerivedT&>(*this); }
     const DerivedT& derived() const { return static_cast<const DerivedT&>(*this); }
 
-    // Joins the receiver thread unless called from it (i.e. from handle_multicast_data()).
-    // Returns false in that case; the loop exits once the callback returns and releases the socket itself.
+    // Joins the receiver thread, unless called from it (from handle_multicast_data()). Then it returns
+    // false, and the loop releases the socket itself after the callback returns.
     bool join_receiver_thread()
     {
         return detail::join_unless_current(receiver_thread_, receiver_thread_id_);
     }
 
-    // Virtual methods to be implemented by derived class
+    // receiver_loop() runs on the worker thread and passes each datagram to
+    // derived().handle_multicast_data(). Derived classes define their own handle_multicast_data().
     void receiver_loop();
     void handle_multicast_data(const std::vector<uint8_t>& data, const std::string& sender_address);
 
@@ -132,7 +133,7 @@ void MulticastReceiverBase<DerivedT>::stop()
     // Wait for receiver thread to finish
     if (!join_receiver_thread())
     {
-        // Called from handle_multicast_data(); the loop exits after it returns and cleans up
+        // Called from handle_multicast_data(). The loop exits after it returns and cleans up.
         return;
     }
 

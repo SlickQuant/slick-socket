@@ -53,7 +53,7 @@ int main()
         std::string test_message = "Hello from TCP client!";
         client.send_data(test_message);
 
-        // Wait receive response
+        // Wait for the response
         while(!data_received_.load(std::memory_order_relaxed));
 
         client.disconnect();

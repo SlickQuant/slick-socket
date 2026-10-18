@@ -11,7 +11,7 @@ endif()
 
 if(WEPOLL_INCLUDE_DIR AND NOT WEPOLL_LIBRARY)
     # The vcpkg toolchain searches debug/lib before lib for Debug and multi-config builds. Its headers are
-    # never under debug/, so the lib directory next to them holds the Release library: search it first.
+    # never under debug/, so the lib directory next to them holds the Release library. Search it first.
     get_filename_component(_wepoll_root "${WEPOLL_INCLUDE_DIR}" DIRECTORY)
     find_library(WEPOLL_LIBRARY_RELEASE NAMES wepoll HINTS "${_wepoll_root}/lib" NO_DEFAULT_PATH)
     find_library(WEPOLL_LIBRARY_RELEASE NAMES wepoll)
@@ -41,7 +41,7 @@ if(WEPOLL_INCLUDE_DIR AND (WEPOLL_LIBRARY OR WEPOLL_LIBRARY_RELEASE OR WEPOLL_LI
                         "${WEPOLL_LIBRARY_${_wepoll_config}}")
                 endif()
             endforeach()
-            # Other configurations use Release; a one-library install serves all configurations.
+            # Other configurations use Release, and a one-library install serves every configuration.
             if(WEPOLL_LIBRARY_RELEASE)
                 set(_wepoll_fallback "${WEPOLL_LIBRARY_RELEASE}")
             else()

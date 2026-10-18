@@ -14,7 +14,7 @@ if(NOT GTest_FOUND)
     FetchContent_MakeAvailable(googletest)
 
     # googletest's own PrintTo(char8_t/char16_t) trips newer clang's -Wcharacter-conversion
-    # (google/googletest#4762); silence it for googletest only, where the compiler knows the warning
+    # (google/googletest#4762). Silence it for googletest only, where the compiler knows the warning.
     include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag(-Wcharacter-conversion SLICK_SOCKET_HAS_WCHARACTER_CONVERSION)
     if(SLICK_SOCKET_HAS_WCHARACTER_CONVERSION)

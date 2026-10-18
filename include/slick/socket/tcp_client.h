@@ -50,7 +50,7 @@ struct TCPClientConfig
     uint16_t server_port = 5000;
     int receive_buffer_size = 4096;
     std::chrono::milliseconds connection_timeout{30000};
-    int cpu_affinity = -1;  // -1 means no affinity, otherwise specify CPU core index
+    int cpu_affinity = -1;  // CPU core index to pin to, or -1 for no affinity
 };
 
 template<typename DerivedT>
@@ -60,20 +60,19 @@ public:
     explicit TCPClientBase(std::string name, const TCPClientConfig& config = TCPClientConfig());
     virtual ~TCPClientBase();
 
-    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
+    // Not copyable or movable, because the object owns sockets and its worker thread holds `this`
     TCPClientBase(const TCPClientBase&) = delete;
     TCPClientBase& operator=(const TCPClientBase&) = delete;
     TCPClientBase(TCPClientBase&&) = delete;
     TCPClientBase& operator=(TCPClientBase&&) = delete;
 
-    // connect()/disconnect() must not run concurrently with each other; call them from one thread at a
-    // time. They replace the socket and client thread and are not synchronized against each other. The
-    // one supported overlap is disconnect() from a callback while another thread calls disconnect(): on
-    // the client thread, disconnect() only flags the shutdown. send_data() may run on any thread,
-    // concurrently with both.
-    // From the client's callbacks (the client thread), disconnect() is allowed but connect() always fails:
-    // it must first join the previous connection's client thread, which cannot join itself. To reconnect
-    // from onDisconnected(), signal another thread to call connect().
+    // Call connect() and disconnect() from one thread at a time. They replace the socket and the client
+    // thread without synchronizing against each other. The one supported overlap is disconnect() from a
+    // callback while another thread calls disconnect(), because on the client thread disconnect() only
+    // flags the shutdown. send_data() may run on any thread, at the same time as either of them.
+    // From the client's callbacks (the client thread), disconnect() is allowed but connect() always
+    // fails. It would first have to join the previous connection's client thread, which can't join
+    // itself. To reconnect from onDisconnected(), signal another thread to call connect().
     bool connect();
     void disconnect();
     
@@ -82,11 +81,11 @@ public:
         return connected_.load(std::memory_order_relaxed);
     }
 
-    // Safe to call from any number of threads, including concurrently with disconnect(): the socket is
-    // never closed while a send is using it. Blocks until the data is sent or the connection is lost.
-    // Concurrent calls each send their own data in order, but a large message can be split into partial
-    // writes, so callers that rely on message boundaries must not send concurrently.
-    // A broken connection makes it return false and ends the connection, as a server-side close does.
+    // Safe to call from any number of threads, even while another thread calls disconnect(). The socket
+    // is never closed while a send is using it. Blocks until the data is sent or the connection is lost.
+    // Concurrent calls each send their own data in order, but a large message can go out in several
+    // partial writes, so callers that rely on message boundaries must not send concurrently.
+    // On a broken connection it returns false and ends the connection, the same as a server-side close.
     bool send_data(const std::vector<uint8_t>& data);
     bool send_data(const std::string& data)
     {
@@ -108,10 +107,10 @@ protected:
 
     void client_loop();
 
-    // Final step of a successful connect(), shared by both platforms: reports the connection, then
+    // Last step of a successful connect(), shared by both platforms. It reports the connection and then
     // starts the client thread. onConnected() runs first, on the calling thread, so the caller's
-    // post-connect setup completes before any onData()/onDisconnected(); data the server sends
-    // meanwhile waits in the socket. Returns connect()'s result.
+    // post-connect setup finishes before any onData() or onDisconnected(). Data the server sends in the
+    // meantime waits in the socket. Returns connect()'s result.
     bool finish_connect();
     void handle_server_data(std::vector<uint8_t>& buffer);
 
@@ -120,7 +119,8 @@ protected:
     bool release_connection();
 
     // Waits up to timeout_ms for `events` (POLLIN/POLLOUT) on the socket.
-    // Returns false on timeout; true when ready or on error (reported by the following recv/send).
+    // Returns false on timeout, and true when the socket is ready or has an error (the next recv/send
+    // reports it).
     bool wait_socket(short events, int timeout_ms) const;
 
     // How long a blocked receive/send waits before re-checking connected_
@@ -129,7 +129,7 @@ protected:
     // Resolves config_.server_address (IPv4 literal or hostname) to an IPv4 address
     bool resolve_server_address(in_addr& addr) const
     {
-        // Fast path: numeric IPv4 address, no resolver round trip
+        // Fast path for a numeric IPv4 address, which needs no resolver round trip
         if (inet_pton(AF_INET, config_.server_address.c_str(), &addr) == 1)
         {
             return true;
@@ -172,8 +172,8 @@ inline bool TCPClientBase<DerivedT>::finish_connect()
     // onConnected() may have changed the connection before the client thread exists
     if (client_thread_.joinable())
     {
-        // It reconnected (disconnect() then connect()); that connect() started the client thread and
-        // decided the result
+        // It reconnected (disconnect() then connect()). That inner connect() started the client thread
+        // and decided the result.
         return connect_result_;
     }
     if (socket_ == invalid_socket)
@@ -182,11 +182,12 @@ inline bool TCPClientBase<DerivedT>::finish_connect()
         return false;
     }
 
-    // Decided before the client thread starts: once running, it may clear connected_ for a connection
-    // that was made (e.g. the server closed it at once), and that loss is onDisconnected()'s to report.
+    // Decide the result before the client thread starts. Once running, the thread may clear connected_
+    // for a connection that was made, for example when the server closes it at once, and
+    // onDisconnected() reports that loss.
     connect_result_ = connected_.load(std::memory_order_relaxed);
-    // Started even if a send in onConnected() already found the connection broken: the loop then
-    // sees connected_ cleared, reports onDisconnected() and exits, as for any lost connection
+    // Start the thread even if a send in onConnected() already found the connection broken. The loop
+    // then sees connected_ cleared, reports onDisconnected() and exits, as it does for any lost connection.
     client_thread_ = std::thread(&TCPClientBase::client_loop, this);
     return connect_result_;
 }
@@ -194,16 +195,16 @@ inline bool TCPClientBase<DerivedT>::finish_connect()
 template<typename DerivedT>
 inline void TCPClientBase<DerivedT>::disconnect()
 {
-    // The client thread may already have cleared connected_ (server closed the connection),
-    // so the thread and socket are released regardless of the previous state.
+    // The client thread may already have cleared connected_ because the server closed the connection,
+    // so release the thread and socket whatever the previous state was.
     const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
     if (was_connected)
     {
         LOG_INFO("Disconnecting from {}:{}...", config_.server_address, config_.server_port);
     }
 
-    // Connected without a client thread only happens inside onConnected(), before connect() starts the
-    // thread. No thread will report this disconnect then, so it is reported here.
+    // Being connected without a client thread only happens inside onConnected(), before connect()
+    // starts the thread. No thread would report this disconnect, so report it here.
     const bool report_here = was_connected && !client_thread_.joinable();
 
     if (release_connection() && was_connected)

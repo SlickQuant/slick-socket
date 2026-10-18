@@ -48,8 +48,8 @@ TEST(SendGateTest, CloseWaitsForAdmittedSender) {
     EXPECT_EQ(closed.wait_for(5s), std::future_status::ready);
 }
 
-// A sender turned away by a closed gate must not hold up close(); otherwise callers that keep
-// trying to send while the gate is closed could stall stop()/disconnect() indefinitely
+// A sender turned away by a closed gate must not hold up close(). Otherwise callers that keep
+// trying to send while the gate is closed could stall stop()/disconnect() forever.
 TEST(SendGateTest, RejectedSenderDoesNotDelayClose) {
     SendGate gate;
     gate.open();
@@ -90,7 +90,7 @@ TEST(SendGateTest, CloseCompletesUnderSustainedSendAttempts) {
     }
 
     auto cycles = std::async(std::launch::async, [&]() {
-        // Gives the senders time in each state by busy-waiting: the same duration on every OS, unlike
+        // Busy-wait to give the senders time in each state. That takes the same time on every OS, unlike
         // yield() (a whole scheduling quantum on macOS) or sleep_for() (rounded up to 1-15.6 ms on Windows)
         auto busy_wait = []() {
             const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(20);

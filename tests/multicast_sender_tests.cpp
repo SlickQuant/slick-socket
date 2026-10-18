@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 #include <type_traits>
 #include <slick/socket/multicast_sender.h>
+#include "multicast_test_support.h"
 #include <thread>
 #include <chrono>
-#include <cstdlib>
 #include <atomic>
 #include <vector>
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -13,11 +13,6 @@
 // The sender owns its socket, so moving one would leave two owners of the same OS resource
 static_assert(!std::is_move_constructible_v<slick::socket::MulticastSender>);
 static_assert(!std::is_move_assignable_v<slick::socket::MulticastSender>);
-
-// Restricted environments (like GitHub CI) may block multicast sending
-static bool running_in_ci() {
-    return std::getenv("CI") != nullptr || std::getenv("GITHUB_ACTIONS") != nullptr;
-}
 
 class MulticastSenderTest : public ::testing::Test {
 protected:
@@ -85,20 +80,7 @@ TEST_F(MulticastSenderTest, SendDataWhenRunning) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Send test data
-    std::string test_data = "Hello, Multicast World!";
-    bool result = sender_->send_data(test_data);
-
-    // Check if we're in a restricted environment (like GitHub CI)
-    // where multicast sending might be blocked
-    const bool is_ci = running_in_ci();
-
-    if (is_ci && !result) {
-        // In CI, multicast may be restricted - skip assertions
-        GTEST_SKIP() << "Multicast sending not supported in CI environment";
-    }
-
-    // Should succeed in normal environments
-    EXPECT_TRUE(result);
+    SEND_FIRST_OR_SKIP(*sender_, "Hello, Multicast World!");
 
     // Give time for statistics to update
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -168,33 +150,18 @@ TEST_F(MulticastSenderTest, MultipleDataSends) {
     const int num_sends = 5;
     const std::string base_message = "Message ";
 
-    // Check if we're in a restricted environment
-    const bool is_ci = running_in_ci();
-    int successful_sends = 0;
-
     // Send multiple messages
-    for (int i = 0; i < num_sends; ++i) {
-        std::string message = base_message + std::to_string(i);
-        bool result = sender_->send_data(message);
-        if (result) {
-            successful_sends++;
-        }
-        if (!is_ci) {
-            EXPECT_TRUE(result);
-        }
+    SEND_FIRST_OR_SKIP(*sender_, base_message + "0");
+    for (int i = 1; i < num_sends; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    if (is_ci && successful_sends == 0) {
-        sender_->stop();
-        GTEST_SKIP() << "Multicast sending not supported in CI environment";
+        EXPECT_TRUE(sender_->send_data(base_message + std::to_string(i)));
     }
 
     // Give time for all sends to complete
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Check statistics
-    EXPECT_GE(sender_->get_packets_sent(), static_cast<uint64_t>(successful_sends));
+    EXPECT_EQ(sender_->get_packets_sent(), static_cast<uint64_t>(num_sends));
     EXPECT_GT(sender_->get_bytes_sent(), 0u);
 
     sender_->stop();
@@ -239,7 +206,7 @@ TEST_F(MulticastSenderTest, InvalidMulticastAddress) {
 }
 
 // send_data() on other threads must never use a socket that stop() is closing. Sending on the closed
-// handle fails (e.g. EBADF) and counts as a send error. Also run under ThreadSanitizer.
+// handle fails (for example with EBADF) and counts as a send error. Also run under ThreadSanitizer.
 TEST_F(MulticastSenderTest, SendConcurrentWithStop) {
     sender_ = std::make_unique<slick::socket::MulticastSender>("TestMulticastSender", config_);
     ASSERT_TRUE(sender_->start());
@@ -250,7 +217,7 @@ TEST_F(MulticastSenderTest, SendConcurrentWithStop) {
         senders.emplace_back([&]() {
             const std::vector<uint8_t> payload(64, 0x5a);
             while (!done) {
-                sender_->send_data(payload);  // no pause when rejected: keeps attempts overlapping stop()
+                sender_->send_data(payload);  // no pause when rejected, so attempts keep overlapping stop()
             }
         });
     }
@@ -271,7 +238,9 @@ TEST_F(MulticastSenderTest, SendConcurrentWithStop) {
     }
 
     EXPECT_EQ(restarted, restarts);
-    if (!running_in_ci()) {
+    // Where macOS denies the Local Network permission, every send fails. The stop()/restart race above
+    // is still tested, just not what got sent.
+    if (!slick::socket::test::local_network_denied(config_)) {
         EXPECT_GT(sender_->get_packets_sent(), 0u);
         EXPECT_EQ(sender_->get_send_errors(), 0u);
     }
@@ -284,8 +253,8 @@ public:
     SocketT socket() const { return socket_; }
 };
 
-// A blocking sendto() on a full send buffer cannot notice stop(), which would then wait for it
-// indefinitely; the socket must be non-blocking so send_data() can give up once stopped
+// A blocking sendto() on a full send buffer can't notice stop(), which would then wait for it forever.
+// The socket must be non-blocking so send_data() can give up once stopped.
 TEST_F(MulticastSenderTest, SocketIsNonBlocking) {
 #if defined(_WIN32) || defined(_WIN64)
     GTEST_SKIP() << "Windows cannot query a socket's blocking mode";

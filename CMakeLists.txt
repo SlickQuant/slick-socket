@@ -17,8 +17,9 @@ option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 # a consumer that builds these tests/examples through add_subdirectory/FetchContent
 option(SLICK_SOCKET_WARNINGS_AS_ERRORS "Treat warnings as errors in tests and examples" ${PROJECT_IS_TOP_LEVEL})
 
-# Strict warnings for this project's own targets. The headers are compiled by consumers at any warning
-# level, so the tests/examples build them at a high one. Never applied to the slick::socket interface target.
+# Strict warnings for this project's own targets. Consumers compile the headers at any warning level,
+# so the tests and examples build them at a high one. These flags never apply to the slick::socket
+# interface target.
 function(slick_socket_enable_warnings target)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4 /permissive- $<$<BOOL:${SLICK_SOCKET_WARNINGS_AS_ERRORS}>:/WX>)
@@ -34,7 +35,7 @@ if(WIN32)
   if(TARGET wepoll::wepoll)
     message(STATUS "wepoll: found locally")
   else()
-    # Fallback: Fetch wepoll from GitHub and build it
+    # Otherwise fetch wepoll from GitHub and build it
     message(STATUS "wepoll not found locally, fetching from GitHub...")
     include(FetchContent)
     FetchContent_Declare(
@@ -70,7 +71,7 @@ if(MSVC)
   # Enable policy CMP0091 to allow CMAKE_MSVC_RUNTIME_LIBRARY to be controlled by toolchain/user
   cmake_policy(SET CMP0091 NEW)
   
-  # Only set default if not already specified by user or toolchain (e.g., vcpkg)
+  # Only set a default if the user or the toolchain (such as vcpkg) hasn't set one
   if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
   endif()
@@ -113,7 +114,8 @@ target_include_directories(slick-socket INTERFACE
   $<INSTALL_INTERFACE:include>
 )
 
-# Propagates to every consumer, including installed-package ones; CMAKE_CXX_STANDARD above only covers this project
+# Propagates to every consumer, including ones using the installed package. CMAKE_CXX_STANDARD above
+# only covers this project.
 target_compile_features(slick-socket INTERFACE cxx_std_20)
 
 # Platform-specific dependencies

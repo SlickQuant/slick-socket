@@ -12,20 +12,20 @@
 namespace slick::socket::detail
 {
 
-// Lets any number of threads send on a socket concurrently with the thread that closes it, without a
-// lock on the send path. A sender enters the gate and may use the socket only if it was admitted;
-// close() shuts the gate, then waits until every admitted sender has left, after which the caller
-// owns the socket exclusively and may close or replace it.
+// Lets any number of threads send on a socket while another thread closes it, without a lock on the
+// send path. A sender enters the gate and may use the socket only if it was admitted. close() shuts
+// the gate and waits until every admitted sender has left. After that the caller owns the socket
+// alone and may close or replace it.
 //
 // The closed flag and the number of admitted senders share one atomic word. A sender is admitted by a
 // compare-and-swap that only succeeds while the closed bit is clear, so a rejected sender never
-// changes the count: once close() sets the bit, the count can only fall, and close() cannot be
-// starved by callers that keep trying to send. Entering costs one CAS (retried only when another
-// sender enters at the same moment), leaving one atomic decrement.
+// changes the count. Once close() sets the bit, the count can only fall, and callers that keep trying
+// to send can't starve close(). Entering costs one CAS (retried only when another sender enters at
+// the same moment), and leaving costs one atomic decrement.
 class SendGate
 {
 public:
-    // A sender's stay in the gate; leaves on destruction. Test it before using the socket.
+    // A sender's stay in the gate. It leaves on destruction. Test it before using the socket.
     class Pass
     {
     public:
@@ -63,7 +63,8 @@ public:
         bool admitted_ = false;
     };
 
-    // Admits senders. Everything written before (e.g. the new socket handle) is visible to them.
+    // Admits senders. Everything written before this call, such as the new socket handle, is visible
+    // to them.
     void open() noexcept
     {
         state_.fetch_and(~closed_bit, std::memory_order_release);
@@ -86,10 +87,10 @@ public:
 private:
     static constexpr uint32_t closed_bit = uint32_t{1} << 31;
 
-    // Lets the sender being waited for run. yield() is a plain reschedule on Linux and Windows, but on
-    // macOS, yielding while other threads are runnable drops the caller's priority for a whole scheduling
-    // quantum (~10 ms), so there it sleeps briefly instead. Not a sleep elsewhere: Windows rounds sleeps
-    // up to its timer resolution (1-15.6 ms).
+    // Lets the sender being waited for run. yield() is a plain reschedule on Linux and Windows. On
+    // macOS, yielding while other threads are runnable drops the caller's priority for a whole
+    // scheduling quantum (~10 ms), so there it sleeps briefly instead. Other platforms don't sleep,
+    // because Windows rounds sleeps up to its timer resolution (1-15.6 ms).
     static void backoff() noexcept
     {
 #if defined(__APPLE__)

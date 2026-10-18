@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
-# Configure-only regression: inspect the actual imported artifact selected by
-# generators, without needing to link fake libraries or a compiler installation.
-# Start clean, so library paths cached by a previous run cannot hide a change to the search.
+# Configure-only regression test. It inspects the imported artifact the generators actually
+# select, without linking fake libraries or needing a compiler installation.
+# Start clean, so library paths cached by a previous run can't hide a change to the search.
 file(REMOVE_RECURSE "${TEST_BINARY_DIR}")
 set(prefix "${TEST_BINARY_DIR}/prefix")
 file(MAKE_DIRECTORY "${prefix}/include" "${prefix}/lib" "${prefix}/debug/lib")

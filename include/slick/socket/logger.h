@@ -11,12 +11,12 @@ template<typename... Args>
 constexpr void discard_log_args(const Args&...) noexcept {}
 }
 
-// Default no-op logging. The arguments are referenced in a dead branch, never evaluated, so variables
-// that exist only to be logged do not trigger unused-variable warnings, and the call costs nothing.
+// Default no-op logging. The arguments sit in a dead branch and are never evaluated. Variables that
+// exist only to be logged don't trigger unused-variable warnings, and the call costs nothing.
 #define SLICK_SOCKET_LOG_NOOP(...) do { if (false) { ::slick::socket::detail::discard_log_args(__VA_ARGS__); } } while (0)
 
-// Logging function placeholders
-// User can assign their own log functions by defining these macros before including this file
+// Placeholder logging macros. To use your own log functions, define these macros before including
+// this file.
 #ifndef LOG_DEBUG
 #define LOG_DEBUG(...) SLICK_SOCKET_LOG_NOOP(__VA_ARGS__)
 #endif

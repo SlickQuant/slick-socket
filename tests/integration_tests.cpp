@@ -65,10 +65,10 @@ public:
         last_disconnected_client_id = client_id;
     }
 
-    // Disconnects the client from within a callback; the notification must not re-enter this callback
+    // Disconnects the client from within a callback. The notification must not re-enter this callback.
     void kick(int client_id) {
         disconnect_client(client_id);
-        disconnect_client(client_id);  // already gone: must not notify twice
+        disconnect_client(client_id);  // already gone, so it must not notify twice
         notified_during_kick = disconnected_clients.load() != 0;
     }
 
@@ -250,7 +250,7 @@ private:
     std::string received_data_;
 };
 
-// CPU time consumed by a thread so far; not measured on macOS (returns -1, leaving `thread` unused)
+// CPU time a thread has used so far. Not measured on macOS, where it returns -1 and leaves `thread` unused.
 static std::chrono::nanoseconds thread_cpu_time([[maybe_unused]] std::thread& thread)
 {
 #if defined(_WIN32) || defined(_WIN64)
@@ -298,8 +298,8 @@ static void expect_mostly_idle(std::thread& thread, const char* what)
 }
 
 #if !defined(_WIN32) && !defined(_WIN64)
-// Puts SIGPIPE at its default disposition (terminate the process) for a test's duration, so a write
-// that raises it ends the test run instead of being masked, and restores the previous disposition after
+// Sets SIGPIPE to its default disposition (terminate the process) for the length of a test, so a write
+// that raises it ends the test run instead of being masked. Restores the previous disposition afterwards.
 class DefaultSigpipe
 {
 public:
@@ -351,7 +351,7 @@ protected:
         EXPECT_EQ(g_unsafe_destroys.exchange(0), expected_unsafe_destroys_);
     }
 
-    // Helper to wait for condition with timeout
+    // Waits for a condition, with a timeout
     bool waitForCondition(std::function<bool()> condition, int timeout_ms = 5000) {
         auto start = std::chrono::steady_clock::now();
         while (!condition()) {
@@ -534,7 +534,7 @@ TEST_F(TCPIntegrationTest, PayloadLargerThanReceiveBuffer) {
     EXPECT_EQ(client_->received_data(), std::string(payload.begin(), payload.end()));
 }
 
-// An idle connected client must not keep the server thread busy (e.g. via EPOLLOUT readiness)
+// An idle connected client must not keep the server thread busy (for example through EPOLLOUT readiness)
 TEST_F(TCPIntegrationTest, IdleClientDoesNotSpinServerThread) {
 #if defined(__APPLE__)
     GTEST_SKIP() << "Per-thread CPU time is not measured on macOS";
@@ -583,8 +583,8 @@ TEST_F(TCPIntegrationTest, MaxConnectionsEnforced) {
     rejected->disconnect();
 }
 
-// connect() reports that the connection was made even when the server closes it at once: the client
-// thread may see the close before connect() returns, and that loss is onDisconnected()'s to report
+// connect() reports that the connection was made even when the server closes it at once. The client
+// thread may see the close before connect() returns, and onDisconnected() reports that loss.
 TEST_F(TCPIntegrationTest, ConnectSucceedsWhenServerClosesAtOnce) {
     server_config_.max_connections = 1;
     ASSERT_NO_FATAL_FAILURE(startServer());
@@ -829,8 +829,8 @@ TEST_F(TCPIntegrationTest, SendConcurrentWithDisconnect) {
     EXPECT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == reconnects + 1; }));
 }
 
-// connect() cannot run on the client thread (it would have to join itself), so it fails from
-// onDisconnected(); reconnecting from another thread afterwards works
+// connect() can't run on the client thread (it would have to join itself), so it fails from
+// onDisconnected(). Reconnecting from another thread afterwards works.
 TEST_F(TCPIntegrationTest, ReconnectMustHappenOutsideClientCallbacks) {
     ASSERT_NO_FATAL_FAILURE(startServer());
     client_ = connectClient("IntegrationClient");
@@ -847,8 +847,8 @@ TEST_F(TCPIntegrationTest, ReconnectMustHappenOutsideClientCallbacks) {
     ASSERT_TRUE(waitForCondition([this]() { return server_->connected_clients.load() == 2; }));
 }
 
-// onConnected() completes before any onData(): the caller's post-connect setup must not race data from
-// a server that sends the moment the connection is accepted
+// onConnected() completes before any onData(). The caller's post-connect setup must not race data from
+// a server that sends the moment the connection is accepted.
 TEST_F(TCPIntegrationTest, OnConnectedCompletesBeforeOnData) {
     ASSERT_NO_FATAL_FAILURE(startServer());
     server_->greet_on_connect = true;
@@ -879,8 +879,8 @@ TEST_F(TCPIntegrationTest, DisconnectFromOnConnected) {
     ASSERT_TRUE(waitForCondition([this]() { return client_->received_data() == "again"; }));
 }
 
-// disconnect() then connect() from onConnected(): the nested connect() starts the client thread and the
-// outer one must not start a second; each connection is reported once
+// disconnect() then connect() from onConnected(). The nested connect() starts the client thread and the
+// outer one must not start a second. Each connection is reported once.
 TEST_F(TCPIntegrationTest, ReconnectFromOnConnected) {
     ASSERT_NO_FATAL_FAILURE(startServer());
     client_ = std::make_unique<IntegrationTestClient>("IntegrationClient", client_config_);
@@ -1020,7 +1020,7 @@ TEST_F(TCPIntegrationTest, PendingSendLimitRejectsMessages) {
 }
 
 // A first message larger than max_pending_send_bytes is rejected whole even though the queue is
-// empty; a partial direct write would otherwise queue the remainder past the limit
+// empty. Otherwise a partial direct write would queue the remainder past the limit.
 TEST_F(TCPIntegrationTest, PendingSendLimitRejectsOversizedFirstMessage) {
     server_config_.max_pending_send_bytes = 1024 * 1024;
     ASSERT_NO_FATAL_FAILURE(startServer());
@@ -1095,8 +1095,8 @@ TEST_F(TCPIntegrationTest, ClientSendDoesNotSpinWhenServerStalls) {
     }, 20000));
 }
 
-// A server that declares onPoll(): pushes a queued message to a client with no client traffic to
-// trigger it, which is what a gateway draining another thread's queue needs.
+// A server that declares onPoll(). It pushes a queued message to a client without any client traffic
+// to trigger it, which is what a gateway draining another thread's queue needs.
 class PollingServer : public slick::socket::TCPServerBase<PollingServer>
 {
 public:
@@ -1141,7 +1141,7 @@ TEST_F(TCPIntegrationTest, OnPollRunsOnServerThreadAndCanSend) {
     client_ = connectClient("PollClient");
     ASSERT_TRUE(waitForCondition([&]() { return server->client_id_.load() != -1; }));
 
-    // The client never sends anything: the data originates in onPoll()
+    // The client never sends anything. The data comes from onPoll().
     server->push_requested = true;
     ASSERT_TRUE(waitForCondition([&]() { return client_->received_data() == "polled"; }));
     // The client can receive the data before onPoll() stores send_data()'s result, so wait for it too

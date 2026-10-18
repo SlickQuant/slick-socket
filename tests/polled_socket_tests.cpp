@@ -3,11 +3,10 @@
 #include <slick/socket/polled_multicast_receiver.h>
 #include <slick/socket/polled_tcp_client.h>
 #include <slick/socket/tcp_server.h>
+#include "multicast_test_support.h"
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
-#include <cstring>
 #include <functional>
 #include <string>
 #include <thread>
@@ -65,7 +64,7 @@ public:
     std::atomic<size_t> bytes_received{0};
 };
 
-// Runs `step` - one turn of the caller's loop - until `done` or the deadline. Returns whether it was done.
+// Runs `step`, one turn of the caller's loop, until `done` or the deadline. Returns whether it was done.
 bool drive(const std::function<bool()>& done, const std::function<void()>& step = [] {},
            std::chrono::milliseconds timeout = std::chrono::milliseconds(3000))
 {
@@ -149,7 +148,7 @@ TEST_F(PolledTCPClientTest, SendsAndReceivesWithoutAThreadOfItsOwn)
     PolledTCPClient client("Client", config_);
     ASSERT_TRUE(connect(client));
 
-    // Nothing has arrived yet: receive() says so instead of waiting
+    // Nothing has arrived yet, and receive() says so instead of waiting
     std::array<uint8_t, 64> buffer{};
     EXPECT_EQ(client.receive(buffer), 0);
 
@@ -172,7 +171,7 @@ TEST_F(PolledTCPClientTest, LargeSendArrivesWhole)
     ASSERT_TRUE(connect(client));
     server_->echo = false;
 
-    // Far more than the socket buffer holds: send() waits for the server to drain it
+    // Far more than the socket buffer holds, so send() has to wait for the server to drain it
     std::string big(4 * 1024 * 1024, 'x');
     ASSERT_TRUE(client.send(bytes(big)));
     EXPECT_TRUE(drive([&] { return server_->bytes_received.load() == big.size(); }));
@@ -212,7 +211,7 @@ TEST_F(PolledTCPClientTest, RefusedConnectionEndsDisconnected)
     PolledTCPClient client("Client", config_);
     if (client.connect())
     {
-        // Refused, or - where the stack drops the attempt silently - timed out; never left pending
+        // Refused, or timed out where the stack drops the attempt silently. Never left pending.
         EXPECT_TRUE(drive([&] { return client.poll() == PolledTCPClient::State::Disconnected; }, [] {},
                           config_.connection_timeout + std::chrono::milliseconds(2000)));
     }
@@ -262,43 +261,7 @@ protected:
     MulticastSenderConfig sender_config_;
 };
 
-// Sends `message`. Returns an empty string when that worked, otherwise why not: the OS error sendto()
-// left, which send_data() does not overwrite on its way out. The error is cleared first, so a send that
-// failed before reaching sendto() is not blamed on an earlier call.
-std::string send_failure(MulticastSender& sender, const std::string& message)
-{
-#if defined(_WIN32) || defined(_WIN64)
-    WSASetLastError(0);
-#else
-    errno = 0;
-#endif
-    if (sender.send_data(message))
-    {
-        return {};
-    }
-
-    const int error = detail::last_socket_error();
-    if (error == 0)
-    {
-        return "send_data() failed without an OS error";
-    }
-#if defined(_WIN32) || defined(_WIN64)
-    return "error " + std::to_string(error);
-#else
-    return "error " + std::to_string(error) + " (" + std::strerror(error) + ")";
-#endif
-}
-
 } // namespace
-
-// A test's first send. Where this host cannot send multicast at all, as on GitHub's macOS runners, there
-// is nothing for the receiver to read, so the test is skipped as the MulticastSender tests are, saying
-// why the send failed. Once one send has worked, later ones must too.
-#define SEND_FIRST_OR_SKIP(sender, message)                                                      \
-    if (const std::string failure = send_failure((sender), (message)); !failure.empty())        \
-    {                                                                                            \
-        GTEST_SKIP() << "Multicast sending not available in this environment: " << failure;     \
-    }
 
 TEST_F(PolledMulticastReceiverTest, OpensAndCloses)
 {
@@ -308,7 +271,7 @@ TEST_F(PolledMulticastReceiverTest, OpensAndCloses)
     EXPECT_TRUE(receiver.is_open());
     EXPECT_TRUE(receiver.open());  // already open
 
-    // Nothing has been sent: receive() says so instead of waiting
+    // Nothing has been sent, and receive() says so instead of waiting
     std::array<uint8_t, 64> buffer{};
     EXPECT_EQ(receiver.receive(buffer), 0);
 
@@ -335,7 +298,7 @@ TEST_F(PolledMulticastReceiverTest, ReceivesDatagramsOneAtATimeInOrder)
     SEND_FIRST_OR_SKIP(sender, "first");
     ASSERT_TRUE(sender.send_data(std::string("second datagram")));
 
-    // Each call hands over exactly one datagram: boundaries are kept
+    // Each call hands over exactly one datagram, so boundaries are kept
     std::array<uint8_t, 1500> buffer{};
     EXPECT_EQ(receive_one(receiver, buffer), "first");
     EXPECT_EQ(receive_one(receiver, buffer), "second datagram");

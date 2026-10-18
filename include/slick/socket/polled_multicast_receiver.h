@@ -21,18 +21,18 @@ struct PolledMulticastReceiverConfig
     uint16_t port = 5000;
     std::string interface_address = "0.0.0.0";    // Interface to receive on (0.0.0.0 = any)
     bool reuse_address = true;                    // Allow multiple receivers on same port
-    // SO_RCVBUF: what the kernel holds between two receive() calls. A burst larger than this is
-    // dropped by the kernel, so size it for the feed, not for one packet. 0 keeps the system default.
+    // SO_RCVBUF, the amount the kernel holds between two receive() calls. The kernel drops a burst
+    // larger than this, so size it for the feed instead of a single packet. 0 keeps the system default.
     int receive_buffer_size = 0;
 };
 
-// A multicast receiver driven by its caller: it owns no thread and makes no callbacks. The caller's
-// own loop calls receive(), which reads one datagram into the caller's buffer without blocking - no
-// vector per packet, no sender-address string, and no hand-off from a receiver thread. One thread can
-// poll any number of groups, in whatever order it chooses.
+// A multicast receiver driven by its caller. It owns no thread and makes no callbacks. The caller's
+// own loop calls receive(), which reads one datagram into the caller's buffer without blocking.
+// There's no vector per packet, no sender-address string, and no hand-off from a receiver thread.
+// One thread can poll any number of groups, in whatever order it chooses.
 //
-// Not thread-safe: every member is for the one thread that owns the object. For a receiver with its
-// own thread and a callback, see MulticastReceiverBase (multicast_receiver.h).
+// Not thread-safe. Use every member from the one thread that owns the object. For a receiver with
+// its own thread and a callback, see MulticastReceiverBase (multicast_receiver.h).
 class PolledMulticastReceiver : private detail::SocketRuntime
 {
 public:
@@ -44,7 +44,7 @@ public:
 
     ~PolledMulticastReceiver() { close(); }
 
-    // Neither copyable nor movable: the object owns a socket
+    // Not copyable or movable, because the object owns a socket
     PolledMulticastReceiver(const PolledMulticastReceiver&) = delete;
     PolledMulticastReceiver& operator=(const PolledMulticastReceiver&) = delete;
     PolledMulticastReceiver(PolledMulticastReceiver&&) = delete;
@@ -140,17 +140,13 @@ public:
     bool is_open() const noexcept { return socket_ != detail::invalid_polled_socket; }
 
     // Reads one datagram into `buffer` without blocking. Returns its size, 0 when none is waiting, or
-    // -1 on an error (counted in get_receive_errors(); the receiver stays open). A datagram longer
-    // than the buffer is cut to it - buffer.size() is returned - and counted in
+    // -1 on an error. Errors are counted in get_receive_errors(), and the receiver stays open. A
+    // datagram longer than the buffer is cut to fit, returns buffer.size(), and is counted in
     // get_packets_truncated().
     std::ptrdiff_t receive(std::span<uint8_t> buffer) noexcept
     {
-#if defined(_WIN32) || defined(_WIN64)
-        std::ptrdiff_t received = detail::polled_recv(socket_, buffer.data(), buffer.size());
-#else
-        // MSG_TRUNC: the datagram's real length, so one that did not fit is recognised
-        std::ptrdiff_t received = ::recv(socket_, buffer.data(), buffer.size(), MSG_TRUNC);
-#endif
+        bool truncated = false;
+        const std::ptrdiff_t received = detail::polled_recv_datagram(socket_, buffer.data(), buffer.size(), truncated);
         if (received < 0)
         {
             const int error = detail::last_socket_error();
@@ -158,17 +154,12 @@ public:
             {
                 return 0;
             }
-            if (!detail::is_truncated(error))
-            {
-                ++receive_errors_;
-                return -1;
-            }
-            received = static_cast<std::ptrdiff_t>(buffer.size()) + 1;
+            ++receive_errors_;
+            return -1;
         }
-        if (received > static_cast<std::ptrdiff_t>(buffer.size()))
+        if (truncated)
         {
             ++packets_truncated_;
-            received = static_cast<std::ptrdiff_t>(buffer.size());
         }
         ++packets_received_;
         bytes_received_ += static_cast<uint64_t>(received);

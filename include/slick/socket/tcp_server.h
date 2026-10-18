@@ -31,10 +31,10 @@ struct TCPServerConfig
     int max_connections = 100;  // connections beyond this are accepted and closed immediately; <= 0 means unlimited
     bool reuse_address = true;
     int receive_buffer_size = 4096;
-    // Disconnects a client after this long with no traffic in either direction: nothing received and
-    // no send progress. Reported through onClientDisconnected(). 0 (the default) disables it.
+    // Disconnects a client that has had no traffic in either direction for this long, meaning nothing
+    // received and no send progress. onClientDisconnected() reports it. 0 (the default) turns it off.
     std::chrono::milliseconds idle_timeout{0};
-    int cpu_affinity = -1;  // -1 means no affinity, otherwise specify CPU core index
+    int cpu_affinity = -1;  // CPU core index to pin to, or -1 for no affinity
     // Per-client cap on data queued while the peer is not reading. send_data() rejects a message
     // (without sending any of it) if the queue could exceed this, so a single message larger than
     // this is always rejected. 0 means unlimited.
@@ -48,17 +48,17 @@ public:
     explicit TCPServerBase(std::string name, const TCPServerConfig& config = TCPServerConfig());
     virtual ~TCPServerBase();
 
-    // Neither copyable nor movable: the object owns sockets, and its worker thread holds `this`
+    // Not copyable or movable, because the object owns sockets and its worker thread holds `this`
     TCPServerBase(const TCPServerBase&) = delete;
     TCPServerBase& operator=(const TCPServerBase&) = delete;
     TCPServerBase(TCPServerBase&&) = delete;
     TCPServerBase& operator=(TCPServerBase&&) = delete;
 
     // Server control
-    // start()/stop() must not run concurrently with each other; call them from one thread at a time.
-    // They replace the socket and worker thread and are not synchronized against each other. The one
-    // supported overlap is stop() from this object's own callback while another thread calls stop():
-    // on the worker thread, stop() only flags the shutdown.
+    // Call start() and stop() from one thread at a time. They replace the socket and the worker thread
+    // without synchronizing against each other. The one supported overlap is stop() from this object's
+    // own callback while another thread calls stop(), because on the worker thread stop() only flags
+    // the shutdown.
     bool start();
     void stop();
 
@@ -81,9 +81,10 @@ protected:
     void accept_new_client();
     void handle_client_data(int client_id, std::vector<uint8_t>& buffer);
 
-    // Send data to client. Must be called on the server thread (i.e. from a server callback, including
-    // onPoll()). Never blocks: data the socket cannot take right away is queued and flushed when it
-    // becomes writable. The pointer form is the primitive; it sends straight from the caller's buffer.
+    // Sends data to a client. Call it on the server thread, which means from a server callback or
+    // onPoll(). It never blocks. Data the socket can't take right away is queued and sent when the
+    // socket becomes writable. The other overloads forward to the pointer form, which sends straight
+    // from the caller's buffer.
     bool send_data(int client_id, const uint8_t* data, size_t size);
     bool send_data(int client_id, const std::vector<uint8_t>& data)
     {
@@ -94,11 +95,11 @@ protected:
         return send_data(client_id, reinterpret_cast<const uint8_t*>(data.data()), data.size());
     }
 
-    // Closes the client's connection. Must be called on the server thread (i.e. from a server callback).
-    // onClientDisconnected() fires once the current callback returns.
+    // Closes the client's connection. Call it on the server thread, from a server callback.
+    // onClientDisconnected() fires after the current callback returns.
     void disconnect_client(int client_id);
 
-    // Safe to call from any thread: the count is maintained by the server thread
+    // Safe to call from any thread. The server thread keeps the count up to date.
     size_t get_connected_client_count() const noexcept
     {
         return client_count_.load(std::memory_order_relaxed);
@@ -119,10 +120,10 @@ protected:
 
     enum class SendStatus { complete, would_block, failed };
 
-    // Sends data[sent, size) until done or the socket would block; `sent` is advanced
+    // Sends data[sent, size) until it's all sent or the socket would block, advancing `sent`
     SendStatus write_some(SocketT socket, const uint8_t* data, size_t size, size_t& sent);
 
-    // Enables/disables writability notifications for a client socket
+    // Turns writability notifications for a client socket on or off
     bool set_write_interest(SocketT socket, bool enable);
 
     // Closes the listening socket, all client sockets and the event loop handle.
@@ -134,8 +135,8 @@ protected:
         return config_.max_connections > 0 && clients_.size() >= static_cast<size_t>(config_.max_connections);
     }
 
-    // Joins the server thread unless called from it (i.e. from a server callback).
-    // Returns false in that case; the loop exits once the callback returns and releases resources itself.
+    // Joins the server thread, unless called from it (from a server callback). Then it returns false,
+    // and the loop releases resources itself after the callback returns.
     bool join_server_thread()
     {
         return detail::join_unless_current(server_thread_, server_thread_id_);
@@ -172,7 +173,7 @@ protected:
         socket_to_client_id_[socket] = client_id;
         client_count_.store(clients_.size(), std::memory_order_relaxed);
 
-        // Passes the local copy: the callback may disconnect the client, destroying its ClientInfo
+        // Pass the local copy, because the callback may disconnect the client and destroy its ClientInfo
         derived().onClientConnected(client_id, address);
     }
 
@@ -181,8 +182,9 @@ protected:
         return config_.idle_timeout.count() > 0;
     }
 
-    // Runs after the event wait returns, before dispatching. The clock is only read with idle_timeout on,
-    // once per iteration, and every activity stamp in the iteration reuses it.
+    // Runs after the event wait returns and before dispatching. With idle_timeout on, it reads the clock
+    // once per iteration and every activity stamp in the iteration reuses that reading. Without
+    // idle_timeout the clock isn't read at all.
     void begin_iteration()
     {
         if (idle_timeout_enabled())
@@ -200,12 +202,12 @@ protected:
             after_event();
         }
 
-        // Optional hook: a derived class that declares a public `void onPoll()` gets it called once per
-        // loop iteration, on the server thread, whether or not any event arrived. It is where work that
-        // originates off the network - draining a queue another thread fills, timers - can call
-        // send_data()/disconnect_client(), which are server-thread only. Detected at compile time, so a
-        // server without it pays nothing. Iterations are paced by the event wait: back to back with
-        // cpu_affinity set, at most ~1 ms apart otherwise.
+        // Optional hook. If the derived class declares a public `void onPoll()`, it's called once per
+        // loop iteration on the server thread, whether or not any event arrived. Work that doesn't come
+        // from the network, such as draining a queue another thread fills or running timers, can call
+        // send_data()/disconnect_client() from there, since those are server-thread only. It's detected
+        // at compile time, so a server without it pays nothing. The event wait paces the iterations.
+        // They run back to back with cpu_affinity set, and at most ~1 ms apart otherwise.
         if constexpr (requires(DerivedT& d) { d.onPoll(); })
         {
             if (running_.load(std::memory_order_relaxed))
@@ -250,12 +252,12 @@ protected:
         return next;
     }
 
-    // Fires onClientDisconnected() for clients removed since the last call. Called by the server loop
+    // Fires onClientDisconnected() for clients removed since the last call. The server loop calls it
     // after each event, so a send_data()/disconnect_client() issued from a callback never re-enters
-    // user code (e.g. while it iterates its own client list).
+    // user code, for example while that code iterates its own client list.
     void notify_disconnected()
     {
-        // Index loop: a callback may remove more clients, which are reported in the same pass
+        // Loop by index. A callback may remove more clients, and those are reported in the same pass.
         for (size_t i = 0; i < disconnected_.size(); ++i)
         {
             const int client_id = disconnected_[i];  // copied: the callback may grow the vector
@@ -332,8 +334,8 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const uint8_t* dat
 
     ClientInfo& client = it->second;
 
-    // Checked before the direct write: once the kernel takes part of a message, the rest must be
-    // queued whatever its size, so admission can only be all-or-nothing up front
+    // Check before the direct write. Once the kernel takes part of a message, the rest has to be
+    // queued whatever its size, so the all-or-nothing check must happen up front.
     if (config_.max_pending_send_bytes > 0 &&
         client.pending_size() + size > config_.max_pending_send_bytes)
     {
@@ -345,7 +347,7 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const uint8_t* dat
     size_t sent = 0;
     if (!client.has_pending())
     {
-        // Nothing queued, so ordering allows writing straight to the socket
+        // Nothing is queued, so writing straight to the socket keeps the order
         const SendStatus status = write_some(client.socket, data, size, sent);
         if (sent != 0)
         {
@@ -365,7 +367,7 @@ inline bool TCPServerBase<DerivedT>::send_data(int client_id, const uint8_t* dat
         }
     }
 
-    // The peer is not keeping up: queue the rest instead of spinning on the event thread
+    // The peer isn't keeping up. Queue the rest instead of spinning on the event thread.
     LOG_TRACE("Queued {} bytes for client {}", size - sent, client_id);
     return queue_pending(it, data + sent, size - sent);
 }

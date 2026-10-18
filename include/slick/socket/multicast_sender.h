@@ -39,16 +39,15 @@ public:
     explicit MulticastSender(std::string name, const MulticastSenderConfig& config = MulticastSenderConfig());
     virtual ~MulticastSender();
 
-    // Neither copyable nor movable: the object owns its socket
+    // Not copyable or movable, because the object owns its socket
     MulticastSender(const MulticastSender&) = delete;
     MulticastSender& operator=(const MulticastSender&) = delete;
     MulticastSender(MulticastSender&&) = delete;
     MulticastSender& operator=(MulticastSender&&) = delete;
 
     // Sender control
-    // start()/stop() must not run concurrently with each other; call them from one thread at a time.
-    // They replace the socket and are not synchronized against each other. send_data() may run on any
-    // thread, concurrently with both.
+    // Call start() and stop() from one thread at a time. They replace the socket without synchronizing
+    // against each other. send_data() may run on any thread, at the same time as either of them.
     bool start();
     void stop();
 
@@ -57,12 +56,12 @@ public:
         return running_.load(std::memory_order_relaxed);
     }
 
-    // Safe to call from any number of threads, including concurrently with stop(): the socket is never
-    // closed while a send is using it. Each call sends one datagram. If the send buffer is full, it
-    // waits for room, but gives up (returns false) within poll_interval_ms once stop() is called.
+    // Safe to call from any number of threads, even while another thread calls stop(). The socket is
+    // never closed while a send is using it. Each call sends one datagram. If the send buffer is full,
+    // it waits for room, but once stop() is called it gives up and returns false within poll_interval_ms.
     //
-    // The pointer form is the primitive: it sends straight from the caller's buffer, so a publisher
-    // that builds packets in place never copies or allocates per datagram.
+    // The other overloads forward to the pointer form. It sends straight from the caller's buffer, so a
+    // publisher that builds packets in place never copies or allocates per datagram.
     bool send_data(const uint8_t* data, size_t size);
     bool send_data(const std::vector<uint8_t>& data)
     {
@@ -106,8 +105,8 @@ protected:
     SocketT socket_ = invalid_socket;
     detail::SendGate send_gate_;  // keeps socket_ open while send_data() uses it from other threads
 
-    // The group address, resolved once by start() rather than parsed on every send. Written before
-    // send_gate_ opens, so every send_data() that gets past the gate sees it complete.
+    // The group address. start() resolves it once, so sends don't parse it each time. It's written
+    // before send_gate_ opens, so every send_data() that gets past the gate sees the whole value.
     sockaddr_in dest_addr_{};
     bool dest_addr_valid_ = false;
 
@@ -117,8 +116,8 @@ protected:
     std::atomic<uint64_t> send_errors_{0};
 
 private:
-    // Resolves config_.multicast_address into dest_addr_. An invalid address is not a start() failure:
-    // it is reported, and every send then fails and counts a send error.
+    // Resolves config_.multicast_address into dest_addr_. An invalid address doesn't make start() fail.
+    // It's reported, and every send then fails and counts a send error.
     void resolve_destination()
     {
         dest_addr_ = sockaddr_in{};

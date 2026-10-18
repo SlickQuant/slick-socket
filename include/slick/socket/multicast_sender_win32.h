@@ -107,8 +107,8 @@ inline bool MulticastSender::send_data(const uint8_t* data, size_t size)
         return false;
     }
 
-    // The socket is non-blocking: a full send buffer is waited out in short slices, so a stop() on
-    // another thread is noticed instead of this call staying blocked in sendto()
+    // The socket is non-blocking. A full send buffer is waited out in short slices, so this call
+    // notices a stop() on another thread instead of staying blocked in sendto().
     int bytes_sent;
     while ((bytes_sent = sendto(socket_, reinterpret_cast<const char*>(data), static_cast<int>(size),
                                 0, reinterpret_cast<const sockaddr*>(&dest_addr_), sizeof(dest_addr_))) == SOCKET_ERROR &&

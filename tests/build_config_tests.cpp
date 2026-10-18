@@ -1,6 +1,6 @@
 // Build-type macros must come only from CMake's per-configuration defaults. Deriving them from
 // CMAKE_BUILD_TYPE once gave every configuration of a multi-config generator the same DEBUG/NDEBUG,
-// so e.g. the Visual Studio Release configuration was compiled with both.
+// so the Visual Studio Release configuration, for example, was compiled with both.
 #if defined(DEBUG)
 #error "The build must not define DEBUG"
 #endif

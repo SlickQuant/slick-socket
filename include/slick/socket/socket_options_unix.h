@@ -11,9 +11,10 @@
 namespace slick::socket::detail
 {
 
-// Writes to a peer-closed TCP socket must fail with EPIPE rather than raise SIGPIPE, without touching
-// the process-wide signal disposition, which belongs to the embedding application. Every send passes
-// MSG_NOSIGNAL; where the platform also offers the per-socket SO_NOSIGPIPE (macOS/BSD), it is set too.
+// A write to a peer-closed TCP socket must fail with EPIPE instead of raising SIGPIPE. The
+// process-wide signal disposition belongs to the embedding application, so it's left alone. Every
+// send passes MSG_NOSIGNAL, and where the platform also offers the per-socket SO_NOSIGPIPE
+// (macOS/BSD), it's set too.
 inline void suppress_sigpipe([[maybe_unused]] int socket) noexcept
 {
 #ifdef SO_NOSIGPIPE

@@ -112,7 +112,7 @@ inline bool TCPServerBase<DerivedT>::start()
         config_.port = ntohs(server_addr.sin_port);
     }
 
-    // Set up the event loop here so a failure is reported by start() rather than a dead server thread
+    // Set up the event loop here, so start() reports a failure instead of leaving a dead server thread
     if (!create_event_loop())
     {
         closesocket(server_socket_);
@@ -249,7 +249,7 @@ void TCPServerBase<DerivedT>::server_loop()
     int timeout = 0;
     if (config_.cpu_affinity < 0)
     {
-        // CPU isn't pinned wait for 1 ms
+        // The CPU isn't pinned, so wait up to 1 ms
         timeout = 1;
     }
 
@@ -289,8 +289,8 @@ void TCPServerBase<DerivedT>::server_loop()
         end_iteration();
     }
 
-    // The loop owns the sockets; release them here so a stop() issued from a callback also cleans up.
-    // Also covers an event-loop failure, so is_running() does not report a dead server.
+    // The loop owns the sockets, so it releases them here. That way a stop() issued from a callback
+    // still cleans up, and after an event-loop failure is_running() doesn't report a dead server.
     running_.store(false, std::memory_order_release);
     release_resources();
 }
@@ -330,7 +330,7 @@ void TCPServerBase<DerivedT>::accept_new_client()
 
     // Add client socket to epoll
     struct epoll_event ev;
-    // Read readiness only: an idle socket is always writable, so EPOLLOUT would wake the loop continuously
+    // Watch for reads only. An idle socket is always writable, so EPOLLOUT would wake the loop constantly
     ev.events = EPOLLIN | EPOLLRDHUP;
     ev.data.sock = client_socket;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_socket, &ev) < 0)

@@ -100,8 +100,8 @@ inline bool MulticastSender::send_data(const uint8_t* data, size_t size)
         return false;
     }
 
-    // The socket is non-blocking: a full send buffer is waited out in short slices, so a stop() on
-    // another thread is noticed instead of this call staying blocked in sendto()
+    // The socket is non-blocking. A full send buffer is waited out in short slices, so this call
+    // notices a stop() on another thread instead of staying blocked in sendto().
     ssize_t bytes_sent;
     while ((bytes_sent = sendto(socket_, data, size, 0,
                                 reinterpret_cast<const sockaddr*>(&dest_addr_), sizeof(dest_addr_))) < 0 &&
@@ -203,7 +203,7 @@ inline bool MulticastSender::setup_multicast_options()
     {
         int error = errno;
         LOG_WARN("Failed to set multicast TTL. error={} ({})", error, strerror(error));
-        // Don't fail - TTL might not be settable on all platforms
+        // Don't fail, since TTL might not be settable on every platform
     }
 
     // Set multicast loopback
@@ -212,7 +212,7 @@ inline bool MulticastSender::setup_multicast_options()
     {
         int error = errno;
         LOG_WARN("Failed to set multicast loopback. error={} ({})", error, strerror(error));
-        // Don't fail - loopback might not be settable on all platforms
+        // Don't fail, since loopback might not be settable on every platform
     }
 
     // Set multicast interface if specified
@@ -226,7 +226,7 @@ inline bool MulticastSender::setup_multicast_options()
             {
                 int error = errno;
                 LOG_WARN("Failed to set multicast interface. error={} ({})", error, strerror(error));
-                // Don't fail - interface might not be settable on all platforms
+                // Don't fail, since the interface might not be settable on every platform
             }
         }
         else

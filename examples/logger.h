@@ -1,14 +1,14 @@
 #pragma once
 
-// NOTE: This is a simple example logger for demonstration purposes.
-// For production use, consider using a proper logging library like spdlog or slick_logger.
+// A simple logger for the examples. For production, use a real logging library such as spdlog or
+// slick_logger.
 
 #include <iostream>
 #include <chrono>
 #include <format>
 
 namespace {
-    // Single function using vformat handles both cases: with and without arguments
+    // One function built on vformat handles calls with and without arguments
     template<typename... Args>
     void log_impl(const std::string& level, const std::string& fmt, Args&&... args)
     {

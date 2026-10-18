@@ -1,16 +1,20 @@
 #v1.3.0 - [10/17/2026]
-Caller-driven sockets (new): a TCP client and a multicast receiver that own no thread and make no callbacks. The caller's loop reads from them directly, with no hand-off between threads and no allocation per packet, and one thread can serve any number of them. Each is for the one thread that owns it.
+Added caller-driven sockets, a TCP client and a multicast receiver that run no thread of their own and make no callbacks. The caller's loop reads from them directly, without handing data between threads or allocating per packet, and one thread can drive any number of them. Use each socket only from the thread that owns it.
 
 TCP client:
-- Added `PolledTCPClient` (`polled_tcp_client.h`). `connect()` returns at once, and `poll()` completes the connection or reports that it failed or passed `connection_timeout`. Calling `connect()` again after a disconnect reconnects
-- `receive()` reads into the caller's buffer without blocking: it returns the bytes read, `0` when nothing is waiting, or `-1` when the connection is gone
-- `send()` writes straight from the caller's buffer and waits up to `send_timeout` for a server that has stopped reading. If it cannot send everything, it closes the connection and returns `false`
-- `PolledTCPClientConfig` sets `TCP_NODELAY` by default and can set `SO_RCVBUF`/`SO_SNDBUF`
+- Added `PolledTCPClient` (`polled_tcp_client.h`). `connect()` returns at once, and `poll()` finishes the connection or reports a failure or an expired `connection_timeout`. Call `connect()` again to reconnect after a disconnect
+- `receive()` reads into the caller's buffer without blocking. It returns the number of bytes read, `0` when nothing is waiting, or `-1` when the connection is gone
+- `send()` writes straight from the caller's buffer. If the server stops reading, it waits up to `send_timeout`, and if it still cannot send everything, it closes the connection and returns `false`
+- `PolledTCPClientConfig` turns on `TCP_NODELAY` by default and can also set `SO_RCVBUF` and `SO_SNDBUF`
+- Fixed a race in `TCPClientBase::connect()`. When the server closed a new connection straight away, `connect()` returned `true` or `false` depending on whether the client thread saw the close first. It now returns `true` because the connection was made, and `onDisconnected()` reports the close
 
 Multicast:
-- Added `PolledMulticastReceiver` (`polled_multicast_receiver.h`). `receive()` reads one datagram into the caller's buffer without blocking: it returns the datagram's size, `0` when none is waiting, or `-1` on an error, and the receiver stays open after an error
-- A datagram longer than the buffer is cut to the buffer's size and counted by `get_packets_truncated()`
-- `PolledMulticastReceiverConfig::receive_buffer_size` sets `SO_RCVBUF`, which is how much the kernel holds between two `receive()` calls
+- Added `PolledMulticastReceiver` (`polled_multicast_receiver.h`). `receive()` reads one datagram into the caller's buffer without blocking. It returns the datagram's size, `0` when none is waiting, or `-1` on an error, and an error leaves the receiver open
+- `receive()` cuts a datagram longer than the buffer to fit and counts it in `get_packets_truncated()`
+- `PolledMulticastReceiverConfig::receive_buffer_size` sets `SO_RCVBUF`, which limits how much data the kernel holds between two `receive()` calls
+
+General:
+- On macOS 15 and later, multicast tests skip when the OS blocks sends because the process lacks Local Network permission, as it does on CI runners. A skipped test reports the OS error, and any other send failure still fails the test. The CI log lists each skipped test with its reason
 
 #v1.2.0 - [10/03/2026]
 TCP server:

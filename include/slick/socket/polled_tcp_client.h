@@ -23,19 +23,19 @@ struct PolledTCPClientConfig
     std::chrono::milliseconds connection_timeout{30000};
     // How long send() waits for a peer that has stopped reading before it gives the connection up
     std::chrono::milliseconds send_timeout{1000};
-    // TCP_NODELAY: each send() leaves at once instead of waiting to be coalesced with the next
+    // Sets TCP_NODELAY, so each send() goes out at once instead of waiting to be coalesced with the next
     bool no_delay = true;
     int receive_buffer_size = 0;  // SO_RCVBUF; 0 keeps the system default
     int send_buffer_size = 0;     // SO_SNDBUF; 0 keeps the system default
 };
 
-// A TCP client driven by its caller: it owns no thread and makes no callbacks. The caller's own loop
-// calls poll() while a connection is being made and receive() to read, so a busy-polling thread
+// A TCP client driven by its caller. It owns no thread and makes no callbacks. The caller's own loop
+// calls poll() while a connection is being made and receive() to read. A busy-polling thread then
 // reads the bytes itself, with no hand-off from a receiver thread, and several connections can share
 // one thread. Nothing here allocates once the object is built.
 //
-// Not thread-safe: every member is for the one thread that owns the object. For a client with its own
-// thread and callbacks, see TCPClientBase (tcp_client.h).
+// Not thread-safe. Use every member from the one thread that owns the object. For a client with its
+// own thread and callbacks, see TCPClientBase (tcp_client.h).
 class PolledTCPClient : private detail::SocketRuntime
 {
 public:
@@ -53,15 +53,15 @@ public:
 
     ~PolledTCPClient() { disconnect(); }
 
-    // Neither copyable nor movable: the object owns a socket
+    // Not copyable or movable, because the object owns a socket
     PolledTCPClient(const PolledTCPClient&) = delete;
     PolledTCPClient& operator=(const PolledTCPClient&) = delete;
     PolledTCPClient(PolledTCPClient&&) = delete;
     PolledTCPClient& operator=(PolledTCPClient&&) = delete;
 
-    // Starts connecting and returns at once: poll() reports when the connection is made, or has
-    // failed. Returns false when the attempt could not even be started. A hostname is resolved here,
-    // which blocks; an IPv4 literal is not.
+    // Starts connecting and returns at once. poll() reports when the connection is made or has failed.
+    // Returns false if the attempt couldn't even be started. Resolving a hostname here blocks, but an
+    // IPv4 literal doesn't.
     bool connect()
     {
         if (state_ != State::Disconnected)
@@ -117,7 +117,7 @@ public:
     }
 
     // Completes a pending connect() without blocking. Call it from the caller's loop while the state is
-    // Connecting; in any other state it only returns the state.
+    // Connecting. In any other state it just returns the state.
     State poll()
     {
         if (state_ != State::Connecting)
@@ -135,7 +135,7 @@ public:
             return state_;
         }
 
-        // Made, or failed: the pending error says which
+        // Made or failed. The pending error says which.
         const int error = detail::pending_socket_error(socket_);
         if (error != 0)
         {
@@ -161,8 +161,8 @@ public:
     bool is_connected() const noexcept { return state_ == State::Connected; }
 
     // Reads what has arrived, up to buffer.size() bytes, without blocking. Returns the number of bytes
-    // read, 0 when nothing is waiting, or -1 when the connection is gone - closed by the server, or
-    // failed - after which the state is Disconnected.
+    // read, 0 when nothing is waiting, or -1 when the connection is gone (closed by the server, or
+    // failed). After -1 the state is Disconnected.
     std::ptrdiff_t receive(std::span<uint8_t> buffer) noexcept
     {
         if (state_ != State::Connected)
@@ -192,10 +192,10 @@ public:
         return -1;
     }
 
-    // Sends all of `data`, straight from the caller's buffer. A socket buffer that is full - the server
-    // is not reading - is waited on for up to send_timeout. Returns false, with the connection closed,
-    // when the data could not all be sent: part of a message may then have gone out, so the stream
-    // cannot be resumed.
+    // Sends all of `data`, straight from the caller's buffer. If the socket buffer is full because the
+    // server isn't reading, it waits up to send_timeout. Returns false, with the connection closed,
+    // when the data couldn't all be sent. Part of a message may have gone out by then, so the stream
+    // can't be resumed.
     bool send(std::span<const uint8_t> data) noexcept
     {
         if (state_ != State::Connected)

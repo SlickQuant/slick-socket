@@ -12,12 +12,13 @@
 #include <string>
 #include <thread>
 
-// Invoked when a server, client or receiver is destroyed before its worker thread was stopped and joined.
-// The base-class destructor runs after the derived object's members are destroyed, so a callback
-// running at that point touches destroyed state: call stop()/disconnect() before destruction
-// (e.g. in the derived destructor). Asserts in debug builds by default; define this macro before
-// including any slick-socket header to customize it (e.g. to count violations or abort). It runs
-// inside a noexcept destructor, so it must not throw: an escaping exception calls std::terminate.
+// Called when a server, client or receiver is destroyed before its worker thread was stopped and
+// joined. The base-class destructor runs after the derived object's members are destroyed, so a
+// callback running at that point touches destroyed state. Call stop()/disconnect() before
+// destruction, for example in the derived destructor. By default it asserts in debug builds. To
+// customize it, for example to count violations or abort, define this macro before including any
+// slick-socket header. It runs inside a noexcept destructor, so it must not throw. An escaping
+// exception calls std::terminate.
 #ifndef SLICK_SOCKET_ON_UNSAFE_DESTROY
 #define SLICK_SOCKET_ON_UNSAFE_DESTROY() \
     assert(!"slick-socket: call stop()/disconnect() before destroying the derived object")
@@ -62,11 +63,11 @@ private:
     std::atomic<std::thread::id> id_{};
 };
 
-// Returns false (and logs) when a base-class destructor finds the worker not yet joined, i.e.
-// stop()/disconnect() was not called from outside the worker before destruction. Checking the
-// join state (rather than whether the worker is still executing) keeps the report deterministic.
-// The caller invokes SLICK_SOCKET_ON_UNSAFE_DESTROY() so the hook expands in the templated
-// destructor rather than in this shared inline function.
+// Returns false and logs when a base-class destructor finds the worker not yet joined, meaning
+// stop()/disconnect() wasn't called from outside the worker before destruction. It checks the join
+// state instead of whether the worker is still running, which keeps the report deterministic. The
+// caller invokes SLICK_SOCKET_ON_UNSAFE_DESTROY(), so the hook expands in the templated destructor
+// and not in this shared inline function.
 inline bool stopped_before_destroy(const std::thread& worker, const std::string& name)
 {
     if (worker.joinable())
@@ -78,8 +79,8 @@ inline bool stopped_before_destroy(const std::thread& worker, const std::string&
     return true;
 }
 
-// Joins the worker unless called from it (e.g. from one of its callbacks).
-// Returns false in that case; the worker exits on its own and is joined later.
+// Joins the worker, unless called from it (for example from one of its callbacks). Then it returns
+// false, and the worker exits on its own and is joined later.
 inline bool join_unless_current(std::thread& thread, const WorkerThreadId& id)
 {
     if (id.is_current())

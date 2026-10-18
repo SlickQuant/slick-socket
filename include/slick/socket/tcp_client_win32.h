@@ -50,7 +50,7 @@ inline bool TCPClientBase<DerivedT>::connect()
         return true;
     }
 
-    // Reap a previous connection that ended on its own (e.g. server closed it)
+    // Reap a previous connection that ended on its own, for example because the server closed it
     if (!release_connection())
     {
         LOG_ERROR("Cannot reconnect from within the client thread");
@@ -147,13 +147,13 @@ inline bool TCPClientBase<DerivedT>::release_connection()
 {
     if (!detail::join_unless_current(client_thread_, client_thread_id_))
     {
-        // Called from a callback; the loop exits on its own and is joined later
+        // Called from a callback. The loop exits on its own and gets joined later.
         return false;
     }
 
-    // Only close after the client thread is gone so it never reads a closed/reused socket
-    // ...and after every send_data() on another thread has left it. Senders blocked on a full socket
-    // re-check connected_ every poll_interval_ms, which is already false here, so this wait is short.
+    // Close only after the client thread is gone, so it never reads a closed or reused socket, and
+    // after every send_data() on another thread has left the socket. Senders blocked on a full socket
+    // re-check connected_ every poll_interval_ms, and it's already false here, so this wait is short.
     send_gate_.close();
     if (socket_ != invalid_socket)
     {
@@ -194,11 +194,11 @@ inline void TCPClientBase<DerivedT>::client_loop()
         }
     }
 
-    // Connection established - handle server communication
+    // The connection is up, so handle server communication
     std::vector<uint8_t> buffer(config_.receive_buffer_size);
 
-    // Pinned to a core: spin on recv() for the lowest latency. Otherwise block in poll() until data
-    // arrives; the timeout only bounds how long disconnect() waits for this loop to notice.
+    // Pinned to a core, the loop spins on recv() for the lowest latency. Otherwise it blocks in poll()
+    // until data arrives. The timeout only limits how long disconnect() waits for this loop to notice.
     const bool busy_poll = config_.cpu_affinity >= 0;
 
     while (connected_.load(std::memory_order_relaxed))
@@ -247,7 +247,7 @@ inline void TCPClientBase<DerivedT>::client_loop()
         derived().onDisconnected();
     }
 
-    // The socket is closed by release_connection() once this thread has been joined
+    // release_connection() closes the socket once this thread has been joined
     LOG_DEBUG("Client loop ended");
 }
 
@@ -283,7 +283,7 @@ inline bool TCPClientBase<DerivedT>::send_data(const std::vector<uint8_t>& data)
             // Check for non-blocking specific errors
             if (error == WSAEWOULDBLOCK || error == WSAEINTR)
             {
-                // Socket buffer is full: block until the server drains it instead of spinning
+                // The socket buffer is full. Block until the server drains it instead of spinning.
                 if (!connected_.load(std::memory_order_relaxed))
                 {
                     LOG_WARN("Connection closed while sending");
@@ -298,9 +298,9 @@ inline bool TCPClientBase<DerivedT>::send_data(const std::vector<uint8_t>& data)
             // Check if connection is broken
             if (error == WSAECONNRESET || error == WSAECONNABORTED || error == WSAENOTCONN)
             {
-                // Ends the connection the way a server-side close does: the client thread reports
+                // End the connection the way a server-side close does. The client thread reports
                 // onDisconnected() and exits, and the next disconnect()/connect() releases the socket.
-                // Joining or closing here instead would race a disconnect() on another thread.
+                // Joining or closing here would race a disconnect() on another thread.
                 LOG_INFO("Connection lost during send");
                 connected_.store(false, std::memory_order_release);
             }
