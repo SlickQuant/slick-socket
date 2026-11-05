@@ -137,7 +137,7 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
             inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
             std::string sender_address = sender_ip;
 
-            LOG_TRACE("Received {} bytes from {}", bytes_received, sender_address);
+            // LOG_TRACE("Received {} bytes from {}", bytes_received, sender_address);
 
             // Resize buffer to actual data size and call handler
             buffer.resize(static_cast<size_t>(bytes_received));
