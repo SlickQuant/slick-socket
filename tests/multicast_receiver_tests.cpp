@@ -244,3 +244,93 @@ TEST_F(MulticastReceiverTest, StopFromReceiveCallback) {
     receiver_->stop();
     sender.stop();
 }
+
+// Sends `message` every 20 ms until `receiver` handles one more datagram, or `timeout` passes
+static bool send_until_received(slick::socket::MulticastSender& sender, const TestMulticastReceiver& receiver,
+                                const std::string& message,
+                                std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+    const int before = receiver.data_received_count.load();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (receiver.data_received_count.load() == before) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        sender.send_data(message);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return true;
+}
+
+// With IP_MULTICAST_ALL on, Linux hands a receiver bound to INADDR_ANY every group joined on its port,
+// so two receivers sharing a port would each get the other group's datagrams
+TEST_F(MulticastReceiverTest, ReceiversSharingAPortHearOnlyTheirOwnGroup) {
+    config_.multicast_address = "224.0.0.105";
+    config_.port = 12348;
+    config_.receive_timeout = std::chrono::milliseconds(100);
+    slick::socket::MulticastReceiverConfig other_config = config_;
+    other_config.multicast_address = "224.0.0.106";
+
+    slick::socket::MulticastSenderConfig sender_config;
+    sender_config.multicast_address = config_.multicast_address;
+    sender_config.port = config_.port;
+    sender_config.enable_loopback = true;
+    slick::socket::MulticastSenderConfig other_sender_config = sender_config;
+    other_sender_config.multicast_address = other_config.multicast_address;
+    slick::socket::MulticastSender sender("Sender", sender_config);
+    slick::socket::MulticastSender other_sender("OtherSender", other_sender_config);
+    ASSERT_TRUE(sender.start());
+    ASSERT_TRUE(other_sender.start());
+    // Before any receiver runs, so a skip doesn't destroy a running one
+    SEND_FIRST_OR_SKIP(sender, "probe");
+
+    for (const bool bind_to_group : {true, false}) {
+        SCOPED_TRACE(bind_to_group ? "bound to the group" : "bound to 0.0.0.0");
+        config_.bind_to_group = bind_to_group;
+        other_config.bind_to_group = bind_to_group;
+        TestMulticastReceiver receiver("Receiver", config_);
+        TestMulticastReceiver other("Other", other_config);
+        EXPECT_TRUE(receiver.start());
+        EXPECT_TRUE(other.start());
+
+        // The groups' datagrams differ in length, so a leak shows in the byte counts. `other` gets its
+        // own last, and anything leaked into it from the first group is queued ahead of that.
+        EXPECT_TRUE(send_until_received(sender, receiver, "mine"));
+        EXPECT_TRUE(send_until_received(other_sender, other, "theirs"));
+        // Lets `receiver` count a "theirs" leaked into it before it stops
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        receiver.stop();
+        other.stop();
+
+        EXPECT_EQ(receiver.get_bytes_received(), receiver.get_packets_received() * 4);
+        EXPECT_EQ(other.get_bytes_received(), other.get_packets_received() * 6);
+    }
+    sender.stop();
+    other_sender.stop();
+}
+
+// Unicast sent to the port only gets in when the receiver binds 0.0.0.0, as it always does on Windows
+TEST_F(MulticastReceiverTest, HearsUnicastOnlyWhenNotBoundToTheGroup) {
+    config_.multicast_address = "224.0.0.107";
+    config_.port = 12349;
+    config_.receive_timeout = std::chrono::milliseconds(100);
+
+    slick::socket::MulticastSenderConfig unicast_config;
+    unicast_config.multicast_address = "127.0.0.1"; // a host address, so the sender sends plain unicast
+    unicast_config.port = config_.port;
+    slick::socket::MulticastSender unicast("Unicast", unicast_config);
+    ASSERT_TRUE(unicast.start());
+
+    for (const bool bind_to_group : {false, true}) {
+        SCOPED_TRACE(bind_to_group ? "bound to the group" : "bound to 0.0.0.0");
+        config_.bind_to_group = bind_to_group;
+        TestMulticastReceiver receiver("Receiver", config_);
+        EXPECT_TRUE(receiver.start());
+
+        // Waiting the full 3 seconds for a datagram that shouldn't come would only slow the test
+        const bool heard = !bind_to_group || !slick::socket::test::receiver_binds_group;
+        const auto timeout = heard ? std::chrono::milliseconds(3000) : std::chrono::milliseconds(200);
+        EXPECT_EQ(send_until_received(unicast, receiver, "unicast", timeout), heard);
+        receiver.stop();
+    }
+    unicast.stop();
+}

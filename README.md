@@ -51,7 +51,7 @@ set(BUILD_SLICK_SOCKET_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     slick-socket
     GIT_REPOSITORY https://github.com/SlickQuant/slick-socket.git
-    GIT_TAG v1.3.0  # Use the desired version
+    GIT_TAG v1.4.0  # Use the desired version
 )
 
 FetchContent_MakeAvailable(slick-socket)
@@ -340,6 +340,8 @@ int main()
 ```
 
 You can call `stop()` from `handle_multicast_data()`. The receiver thread leaves the group and closes its socket once the callback returns.
+
+Several groups can share a port, because a receiver only gets the group it joined. By default it also binds its group on Linux and macOS, which keeps out unicast and broadcast sent to the port. Set `bind_to_group = false` to bind `0.0.0.0` and get those too, for example when a feed is relayed by unicast over a network without multicast. On Windows a receiver always binds `0.0.0.0`, since Winsock can't bind a multicast address. `PolledMulticastReceiverConfig` has the same setting.
 
 ### Caller-driven sockets
 

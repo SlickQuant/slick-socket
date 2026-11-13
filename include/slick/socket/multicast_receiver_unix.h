@@ -7,6 +7,7 @@
 #if !defined(_WIN32) && !defined(_WIN64)
 
 #include "multicast_receiver.h"
+#include "socket_options_unix.h"
 #include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -54,6 +55,11 @@ bool MulticastReceiverBase<DerivedT>::start()
     }
 
     LOG_INFO("Starting {} for group {}:{}...", name_, config_.multicast_address, config_.port);
+
+    if (!detail::resolve_membership(name_, config_.multicast_address, config_.interface_address, membership_))
+    {
+        return false;
+    }
 
     if (!initialize_socket())
     {
@@ -226,13 +232,8 @@ bool MulticastReceiverBase<DerivedT>::setup_multicast_options()
 #endif
     }
 
-    // Bind to the multicast port
-    sockaddr_in bind_addr{};
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_port = htons(config_.port);
-    bind_addr.sin_addr.s_addr = INADDR_ANY; // Bind to any interface
-
-    if (bind(socket_, reinterpret_cast<const sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0)
+    // The socket hears no other group on this port, whichever address it binds
+    if (!detail::bind_multicast_receiver(socket_, membership_.imr_multiaddr, config_.port, config_.bind_to_group))
     {
         int error = errno;
         LOG_ERROR("Failed to bind socket to port {}. error={} ({})", config_.port, error, strerror(error));
@@ -245,33 +246,7 @@ bool MulticastReceiverBase<DerivedT>::setup_multicast_options()
 template<typename DerivedT>
 bool MulticastReceiverBase<DerivedT>::join_multicast_group()
 {
-    ip_mreq mreq{};
-    
-    // Set multicast group address
-    int result = inet_pton(AF_INET, config_.multicast_address.c_str(), &mreq.imr_multiaddr);
-    if (result != 1)
-    {
-        LOG_ERROR("Invalid multicast address: {}", config_.multicast_address);
-        return false;
-    }
-
-    // Set interface address
-    if (config_.interface_address == "0.0.0.0")
-    {
-        mreq.imr_interface.s_addr = INADDR_ANY;
-    }
-    else
-    {
-        result = inet_pton(AF_INET, config_.interface_address.c_str(), &mreq.imr_interface);
-        if (result != 1)
-        {
-            LOG_WARN("Invalid interface address: {}, using any interface", config_.interface_address);
-            mreq.imr_interface.s_addr = INADDR_ANY;
-        }
-    }
-
-    // Join multicast group
-    if (setsockopt(socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+    if (setsockopt(socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership_, sizeof(membership_)) < 0)
     {
         int error = errno;
         LOG_ERROR("Failed to join multicast group {}. error={} ({})", config_.multicast_address, error, strerror(error));
@@ -288,32 +263,14 @@ void MulticastReceiverBase<DerivedT>::leave_multicast_group()
     if (socket_ == invalid_socket)
         return;
 
-    ip_mreq mreq{};
-    
-    // Set multicast group address
-    int result = inet_pton(AF_INET, config_.multicast_address.c_str(), &mreq.imr_multiaddr);
-    if (result == 1)
+    if (setsockopt(socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &membership_, sizeof(membership_)) < 0)
     {
-        // Set interface address
-        if (config_.interface_address == "0.0.0.0")
-        {
-            mreq.imr_interface.s_addr = INADDR_ANY;
-        }
-        else
-        {
-            inet_pton(AF_INET, config_.interface_address.c_str(), &mreq.imr_interface);
-        }
-
-        // Leave multicast group
-        if (setsockopt(socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
-        {
-            int error = errno;
-            LOG_WARN("Failed to leave multicast group {}. error={} ({})", config_.multicast_address, error, strerror(error));
-        }
-        else
-        {
-            LOG_DEBUG("Left multicast group {}", config_.multicast_address);
-        }
+        int error = errno;
+        LOG_WARN("Failed to leave multicast group {}. error={} ({})", config_.multicast_address, error, strerror(error));
+    }
+    else
+    {
+        LOG_DEBUG("Left multicast group {}", config_.multicast_address);
     }
 }
 

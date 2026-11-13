@@ -10,6 +10,13 @@
 namespace slick::socket::test
 {
 
+// Whether a receiver with bind_to_group binds its group. Winsock can't, so it always binds 0.0.0.0.
+#if defined(_WIN32) || defined(_WIN64)
+inline constexpr bool receiver_binds_group = false;
+#else
+inline constexpr bool receiver_binds_group = true;
+#endif
+
 // What one send_data() call did, and the OS error it left when it failed
 struct SendOutcome
 {

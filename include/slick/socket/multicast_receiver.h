@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <slick/socket/logger.h>
+#include <slick/socket/polled_socket.h>
 #include <slick/socket/worker_thread.h>
 #include <vector>
 #include <string>
@@ -27,6 +28,10 @@ struct MulticastReceiverConfig
     uint16_t port = 5000;
     std::string interface_address = "0.0.0.0"; // Interface to receive on (0.0.0.0 = any)
     bool reuse_address = true; // Allow multiple receivers on same port
+    // On Unix the receiver binds its group, which keeps out unicast and broadcast sent to the port.
+    // Set false to bind 0.0.0.0 and get them too. On Windows it always binds 0.0.0.0, since Winsock
+    // can't bind a multicast address.
+    bool bind_to_group = true;
     int receive_buffer_size = 65536; // Socket receive buffer size
     std::chrono::milliseconds receive_timeout{1000}; // Timeout for receive operations
 };
@@ -119,6 +124,9 @@ private:
 
     // Leaves the group and closes the socket (no-op when already released)
     void release_socket();
+
+    // Group and interface, resolved once by start() for the bind, join and leave
+    ip_mreq membership_{};
 };
 
 template<typename DerivedT>

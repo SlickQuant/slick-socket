@@ -1,3 +1,11 @@
+#v1.4.0 - [11/12/2026]
+Breaking changes:
+- Added `bind_to_group` to `MulticastReceiverConfig` and `PolledMulticastReceiverConfig`, on by default. On Unix a receiver now binds its group, so unicast and broadcast sent to the port no longer reach it. Set it to `false` to bind `0.0.0.0` and get them again. Windows receivers always bind `0.0.0.0`, since Winsock can't bind a multicast address
+
+Multicast:
+- Fixed Linux receivers getting other groups' datagrams. A socket bound to `INADDR_ANY` got every group joined by any socket on the host, as long as the port matched. Receivers now turn off `IP_MULTICAST_ALL`, so they only get the group they joined, on the interface they joined it on
+- `MulticastReceiverBase` parses the group and interface once in `start()`, and an invalid group now fails `start()` before it opens a socket
+
 #v1.3.0 - [10/18/2026]
 Added caller-driven sockets, a TCP client and a multicast receiver that run no thread of their own and make no callbacks. The caller's loop reads from them directly, without handing data between threads or allocating per packet, and one thread can drive any number of them. Use each socket only from the thread that owns it.
 

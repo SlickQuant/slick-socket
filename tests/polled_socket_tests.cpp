@@ -348,6 +348,71 @@ TEST_F(PolledMulticastReceiverTest, TwoReceiversOnOnePortBothHearTheGroup)
     sender.stop();
 }
 
+// With IP_MULTICAST_ALL on, Linux hands a receiver bound to INADDR_ANY every group joined on its port,
+// so two receivers sharing a port would each get the other group's datagrams
+TEST_F(PolledMulticastReceiverTest, ReceiversSharingAPortHearOnlyTheirOwnGroup)
+{
+    MulticastSenderConfig other_sender_config = sender_config_;
+    other_sender_config.multicast_address = "224.0.0.104";
+    MulticastSender sender("Sender", sender_config_);
+    MulticastSender other_sender("OtherSender", other_sender_config);
+    ASSERT_TRUE(sender.start());
+    ASSERT_TRUE(other_sender.start());
+
+    std::array<uint8_t, 64> buffer{};
+    for (const bool bind_to_group : {true, false})
+    {
+        SCOPED_TRACE(bind_to_group ? "bound to the group" : "bound to 0.0.0.0");
+        receiver_config_.bind_to_group = bind_to_group;
+        PolledMulticastReceiverConfig other_config = receiver_config_;
+        other_config.multicast_address = other_sender_config.multicast_address;
+        PolledMulticastReceiver receiver("Receiver", receiver_config_);
+        PolledMulticastReceiver other("Other", other_config);
+        ASSERT_TRUE(receiver.open());
+        ASSERT_TRUE(other.open());
+        SEND_FIRST_OR_SKIP(sender, "mine");
+        ASSERT_TRUE(other_sender.send_data(std::string("theirs")));
+
+        // A leaked datagram would come out ahead of the receiver's own, or still be queued after it
+        EXPECT_EQ(receive_one(receiver, buffer), "mine");
+        EXPECT_EQ(receive_one(other, buffer), "theirs");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        EXPECT_EQ(receiver.receive(buffer), 0);
+        EXPECT_EQ(other.receive(buffer), 0);
+    }
+    sender.stop();
+    other_sender.stop();
+}
+
+// Unicast sent to the port only gets in when the receiver binds 0.0.0.0, as it always does on Windows
+TEST_F(PolledMulticastReceiverTest, HearsUnicastOnlyWhenNotBoundToTheGroup)
+{
+    MulticastSenderConfig unicast_config = sender_config_;
+    unicast_config.multicast_address = "127.0.0.1";  // a host address, so the sender sends plain unicast
+    MulticastSender unicast("Unicast", unicast_config);
+    ASSERT_TRUE(unicast.start());
+
+    std::array<uint8_t, 64> buffer{};
+    for (const bool bind_to_group : {false, true})
+    {
+        SCOPED_TRACE(bind_to_group ? "bound to the group" : "bound to 0.0.0.0");
+        receiver_config_.bind_to_group = bind_to_group;
+        PolledMulticastReceiver receiver("Receiver", receiver_config_);
+        ASSERT_TRUE(receiver.open());
+        ASSERT_TRUE(unicast.send_data(std::string("unicast")));
+        if (bind_to_group && test::receiver_binds_group)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            EXPECT_EQ(receiver.receive(buffer), 0);
+        }
+        else
+        {
+            EXPECT_EQ(receive_one(receiver, buffer), "unicast");
+        }
+    }
+    unicast.stop();
+}
+
 TEST_F(PolledMulticastReceiverTest, ReopensAfterClose)
 {
     PolledMulticastReceiver receiver("Receiver", receiver_config_);

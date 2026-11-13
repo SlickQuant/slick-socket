@@ -21,6 +21,10 @@ struct PolledMulticastReceiverConfig
     uint16_t port = 5000;
     std::string interface_address = "0.0.0.0";    // Interface to receive on (0.0.0.0 = any)
     bool reuse_address = true;                    // Allow multiple receivers on same port
+    // On Unix the receiver binds its group, which keeps out unicast and broadcast sent to the port.
+    // Set false to bind 0.0.0.0 and get them too. On Windows it always binds 0.0.0.0, since Winsock
+    // can't bind a multicast address.
+    bool bind_to_group = true;
     // SO_RCVBUF, the amount the kernel holds between two receive() calls. The kernel drops a burst
     // larger than this, so size it for the feed instead of a single packet. 0 keeps the system default.
     int receive_buffer_size = 0;
@@ -57,15 +61,9 @@ public:
         {
             return true;
         }
-        if (inet_pton(AF_INET, config_.multicast_address.c_str(), &membership_.imr_multiaddr) != 1)
+        if (!detail::resolve_membership(name_, config_.multicast_address, config_.interface_address, membership_))
         {
-            LOG_ERROR("{}: invalid multicast address {}", name_, config_.multicast_address);
             return false;
-        }
-        if (inet_pton(AF_INET, config_.interface_address.c_str(), &membership_.imr_interface) != 1)
-        {
-            LOG_WARN("{}: invalid interface address {}, using any interface", name_, config_.interface_address);
-            membership_.imr_interface.s_addr = htonl(INADDR_ANY);
         }
 
         socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -100,11 +98,8 @@ public:
 #endif
         }
 
-        sockaddr_in bind_addr{};
-        bind_addr.sin_family = AF_INET;
-        bind_addr.sin_port = htons(config_.port);
-        bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (::bind(socket_, reinterpret_cast<const sockaddr*>(&bind_addr), sizeof(bind_addr)) != 0)
+        // The socket hears no other group on this port, whichever address it binds
+        if (!detail::bind_multicast_receiver(socket_, membership_.imr_multiaddr, config_.port, config_.bind_to_group))
         {
             LOG_ERROR("{}: failed to bind to port {}: error {}", name_, config_.port, detail::last_socket_error());
             release_socket();

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <slick/socket/logger.h>
 #include <stdexcept>
 #include <string>
 
@@ -26,8 +27,8 @@
 #include <unistd.h>
 #endif
 
-// Code shared by the caller-driven sockets (polled_tcp_client.h, polled_multicast_receiver.h). It
-// holds the few calls that are spelled differently on Winsock and on BSD sockets.
+// Code shared by the caller-driven sockets (polled_tcp_client.h, polled_multicast_receiver.h) and the
+// multicast receivers. It holds the few calls that are spelled differently on Winsock and on BSD sockets.
 namespace slick::socket::detail
 {
 
@@ -97,6 +98,19 @@ inline std::ptrdiff_t polled_recv_datagram(PolledSocket socket, uint8_t* buffer,
 inline std::ptrdiff_t polled_send(PolledSocket socket, const uint8_t* data, size_t size) noexcept
 {
     return send(socket, reinterpret_cast<const char*>(data), static_cast<int>(size), 0);
+}
+
+// Winsock can't bind a multicast address, so this always binds INADDR_ANY. Other groups on the port
+// still stay out, since Winsock only hands a socket the groups it joined. The Unix version in
+// socket_options_unix.h can bind the group.
+inline bool bind_multicast_receiver(PolledSocket socket, in_addr /*group*/, uint16_t port,
+                                    bool /*bind_to_group*/) noexcept
+{
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    return ::bind(socket, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0;
 }
 
 #else
@@ -234,6 +248,25 @@ inline bool resolve_ipv4(const std::string& address, in_addr& out)
 
     out = reinterpret_cast<const sockaddr_in*>(result->ai_addr)->sin_addr;
     freeaddrinfo(result);
+    return true;
+}
+
+// Parses a multicast receiver's group and interface. An invalid group fails, and an invalid interface
+// falls back to any interface. "0.0.0.0" parses to INADDR_ANY.
+inline bool resolve_membership(const std::string& name, const std::string& group,
+                               const std::string& interface_address, ip_mreq& membership)
+{
+    membership = ip_mreq{};
+    if (inet_pton(AF_INET, group.c_str(), &membership.imr_multiaddr) != 1)
+    {
+        LOG_ERROR("{}: invalid multicast address {}", name, group);
+        return false;
+    }
+    if (inet_pton(AF_INET, interface_address.c_str(), &membership.imr_interface) != 1)
+    {
+        LOG_WARN("{}: invalid interface address {}, using any interface", name, interface_address);
+        membership.imr_interface.s_addr = htonl(INADDR_ANY);
+    }
     return true;
 }
 
