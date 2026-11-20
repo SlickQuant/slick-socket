@@ -92,7 +92,13 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
 {
     detail::WorkerThreadId::Scope worker_scope(receiver_thread_id_);
 
-    std::vector<uint8_t> buffer(config_.receive_buffer_size);
+    // The buffer keeps its full size for the whole loop. Shrinking it to each datagram and growing it
+    // back would zero-fill the tail every time, a per-datagram memset that grows with the buffer and caps
+    // throughput. It's also capped at max_datagram_size, so a large receive_buffer_size (sized for
+    // bursts in the kernel) adds no per-datagram cost here.
+    const size_t datagram_capacity = (std::min)(static_cast<size_t>((std::max)(config_.receive_buffer_size, 1)),
+                                                max_datagram_size);
+    std::vector<uint8_t> buffer(datagram_capacity);
     sockaddr_in sender_addr{};
     socklen_t sender_addr_len = sizeof(sender_addr);
 
@@ -145,10 +151,7 @@ void MulticastReceiverBase<DerivedT>::receiver_loop()
 
             // LOG_TRACE("Received {} bytes from {}", bytes_received, sender_address);
 
-            // Resize buffer to actual data size and call handler
-            buffer.resize(static_cast<size_t>(bytes_received));
-            derived().handle_multicast_data(buffer, sender_address);
-            buffer.resize(config_.receive_buffer_size); // Reset buffer size
+            dispatch_datagram(buffer.data(), static_cast<size_t>(bytes_received), sender_address);
         }
     }
 

@@ -47,6 +47,8 @@ add_executable(tests
     integration_tests.cpp
     multicast_sender_tests.cpp
     multicast_receiver_tests.cpp
+    multicast_performance_tests.cpp
+    allocation_counter.cpp
     build_config_tests.cpp
     send_gate_tests.cpp
     polled_socket_tests.cpp

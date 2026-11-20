@@ -6,6 +6,7 @@ static std::atomic<int> g_unsafe_destroys{0};
 #define SLICK_SOCKET_ON_UNSAFE_DESTROY() (++g_unsafe_destroys)
 
 #include "../examples/logger.h"
+#include "thread_cpu_time.h"
 #include <slick/socket/tcp_server.h>
 #include <slick/socket/tcp_client.h>
 #include <thread>
@@ -18,13 +19,11 @@ static std::atomic<int> g_unsafe_destroys{0};
 #include <cstring>
 #include <optional>
 
-#if defined(_WIN32) || defined(_WIN64)
-#include <windows.h>
-#else
-#include <pthread.h>
+#if !defined(_WIN32) && !defined(_WIN64)
 #include <signal.h>
-#include <time.h>
 #endif
+
+using slick::socket::test::thread_cpu_time;
 
 // Called from a callback after the peer closed the connection but before the event loop has seen it.
 // The first write draws a reset from the peer, so a later one fails with EPIPE/ECONNRESET, which must
@@ -249,30 +248,6 @@ private:
     std::mutex data_mutex_;
     std::string received_data_;
 };
-
-// CPU time a thread has used so far. Not measured on macOS, where it returns -1 and leaves `thread` unused.
-static std::chrono::nanoseconds thread_cpu_time([[maybe_unused]] std::thread& thread)
-{
-#if defined(_WIN32) || defined(_WIN64)
-    FILETIME creation, exit, kernel, user;
-    if (!GetThreadTimes(thread.native_handle(), &creation, &exit, &kernel, &user)) {
-        return std::chrono::nanoseconds{-1};
-    }
-    auto ticks = [](const FILETIME& ft) {
-        return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-    };
-    return std::chrono::nanoseconds{(ticks(kernel) + ticks(user)) * 100};
-#elif defined(__APPLE__)
-    return std::chrono::nanoseconds{-1};
-#else
-    clockid_t clock_id;
-    timespec ts{};
-    if (pthread_getcpuclockid(thread.native_handle(), &clock_id) != 0 || clock_gettime(clock_id, &ts) != 0) {
-        return std::chrono::nanoseconds{-1};
-    }
-    return std::chrono::seconds{ts.tv_sec} + std::chrono::nanoseconds{ts.tv_nsec};
-#endif
-}
 
 static std::vector<uint8_t> make_payload(size_t size)
 {

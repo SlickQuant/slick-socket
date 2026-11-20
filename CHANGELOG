@@ -1,3 +1,12 @@
+#v1.5.0 - [11/20/2026]
+Multicast:
+- `MulticastReceiverBase` calls `handle_multicast_data(const uint8_t* data, size_t size, const std::string& sender_address)` when the derived class declares it, chosen at compile time. Nothing is copied or allocated per datagram. The old `handle_multicast_data(const std::vector<uint8_t>&, const std::string&)` still works and now costs one copy of the datagram, down from a pass over the whole receive buffer
+- The receiver loop no longer resizes its buffer for every datagram. Growing it back zero-filled the tail, so each datagram paid a memset of the whole buffer. That grew with `receive_buffer_size` and could cap a receiver at a few thousand datagrams a second
+- The datagram buffer is capped at 65535 bytes, the UDP maximum. A large `receive_buffer_size`, set so the kernel can absorb bursts, no longer adds per-datagram cost. On Windows `recvfrom()` gets slower as the length passed to it grows, which made a 4 MiB setting several times slower per datagram. `receive_buffer_size` still sets `SO_RCVBUF`
+
+Tests:
+- Added multicast performance and burst regression tests. Sustained feeds and random bursts that fit the receive buffer must arrive with nothing lost, duplicated or damaged. An overload must not damage what does arrive or stop the receiver. The tests also fail if the receive cost per datagram grows with `receive_buffer_size`, or if the receive path allocates per datagram
+
 #v1.4.0 - [11/12/2026]
 Breaking changes:
 - Added `bind_to_group` to `MulticastReceiverConfig` and `PolledMulticastReceiverConfig`, on by default. On Unix a receiver now binds its group, so unicast and broadcast sent to the port no longer reach it. Set it to `false` to bind `0.0.0.0` and get them again. Windows receivers always bind `0.0.0.0`, since Winsock can't bind a multicast address

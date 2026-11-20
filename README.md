@@ -341,6 +341,10 @@ int main()
 
 You can call `stop()` from `handle_multicast_data()`. The receiver thread leaves the group and closes its socket once the callback returns.
 
+`handle_multicast_data` can also take a pointer: `void handle_multicast_data(const uint8_t* data, size_t size, const std::string& sender_address)`. When the class declares it, the receiver picks it at compile time and passes its own receive buffer, so nothing is copied or allocated per datagram. The `std::vector` form gets a vector sized to the datagram, which costs one copy. Use the pointer form for a feed.
+
+`receive_buffer_size` is the socket's `SO_RCVBUF`, everything the kernel holds between two reads. Size it for the feed's bursts, not for a single datagram. A burst bigger than the buffer gets dropped no matter how fast the loop is. It also caps the largest datagram read at 65535 bytes or `receive_buffer_size`, whichever is smaller. The threaded receiver doesn't report a datagram that was cut to fit. `PolledMulticastReceiver` counts those in `get_packets_truncated()`.
+
 Several groups can share a port, because a receiver only gets the group it joined. By default it also binds its group on Linux and macOS, which keeps out unicast and broadcast sent to the port. Set `bind_to_group = false` to bind `0.0.0.0` and get those too, for example when a feed is relayed by unicast over a network without multicast. On Windows a receiver always binds `0.0.0.0`, since Winsock can't bind a multicast address. `PolledMulticastReceiverConfig` has the same setting.
 
 ### Caller-driven sockets
@@ -436,6 +440,8 @@ cd build && ctest -V -C Debug
 ```
 
 Some tests skip where the behavior they check doesn't exist or can't be measured, such as `SIGPIPE` on Windows. The multicast tests also skip when macOS refuses to send because the process lacks the Local Network permission, as on GitHub's macOS runners. The skip message gives the OS error, `error 65 (No route to host)`, and any other multicast send failure fails the test. `--output-on-failure` doesn't show why a test was skipped. Look in `build/Testing/Temporary/LastTest.log` for the reason; the CI workflow prints it after the tests.
+
+The multicast performance and burst tests (`MulticastReceiverPerformanceTest`, `MulticastReceiverBurstTest`, `PolledMulticastReceiverPerformanceTest`) feed sustained traffic and random bursts. They fail on a lost, duplicated or damaged datagram, on a receive cost that grows with `receive_buffer_size`, and on an allocation per datagram. Each test prints its measurements with a `[ perf ]` prefix. The randomized ones use a fixed seed, and `SLICK_SOCKET_PERF_SEED` replays a different one.
 
 ## Development
 
